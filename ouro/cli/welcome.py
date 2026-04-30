@@ -97,41 +97,180 @@ def _get_ouro_title() -> str:
     return OURO_FALLBACK_TITLE
 
 
-def _get_recommended_models(ram_gb: float) -> List[Dict[str, Any]]:
-    """Return a curated list of popular mlx-community models that run fast on this machine.
+def _hf_cache_path() -> "Path":
+    """Return the path to the local HuggingFace model cache file."""
+    from pathlib import Path
+    cache_dir = Path.home() / ".ouro" / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / "hf_mlx_models.json"
 
-    Size estimates are approximate (4-bit quantized).  Models are filtered to
-    those whose size_gb < 60 % of available RAM so they earn a green bar.
-    """
-    # (name, approx_size_gb)  — all from mlx-community on HuggingFace
-    CATALOG = [
-        ("gemma-3-1b-it-qat-4bit",           0.7),
-        ("parakeet-tdt-0.6b-v3",              0.6),
-        ("Kokoro-82M-bf16",                   0.2),
-        ("gemma-3-4b-it-qat-4bit",            2.5),
-        ("Qwen3.5-9B-OptiQ-4bit",             5.5),
-        ("Qwen3.5-9B-MLX-4bit",               5.5),
-        ("gemma-3-12b-it-qat-4bit",           7.5),
-        ("Qwen2.5-14B-Instruct-4bit",         8.5),
-        ("gpt-oss-20b-MXFP4-Q8",            13.0),
-        ("gemma-3-27b-it-qat-4bit",          16.5),
-        ("gemma-4-26b-a4b-it-4bit",          16.0),
-        ("Qwen3-30B-A3B-4bit",               18.5),
-        ("Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-4bit", 17.0),
-        ("gemma-4-31b-it-4bit",              19.0),
-        ("Devstral-Small-2-24B-Instruct-2512-4bit", 15.0),
-    ]
 
-    fast_threshold = ram_gb * 0.60  # green zone
+def _fetch_hf_models() -> List[Dict[str, Any]]:
+    """Fetch mlx-community models from HuggingFace API and return a list of dicts."""
+    import urllib.request
+    import json
+
     results = []
-    for model_name, size_gb in CATALOG:
-        if size_gb <= fast_threshold:
+    page = 1
+    per_page = 100
+
+    while True:
+        url = (
+            f"https://huggingface.co/api/models"
+            f"?author=mlx-community&limit={per_page}&offset={(page-1)*per_page}"
+            f"&sort=downloads&direction=-1"
+        )
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "ouro/0.1"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception:
+            break
+
+        if not data:
+            break
+
+        for m in data:
+            model_id = m.get("id", "")
+            # estimate size from safetensors metadata if available
+            size_gb = 0.0
+            siblings = m.get("siblings", [])
+            total_bytes = sum(
+                s.get("size", 0) for s in siblings
+                if s.get("rfilename", "").endswith((".safetensors", ".gguf", ".bin"))
+            )
+            if total_bytes:
+                size_gb = round(total_bytes / (1024 ** 3), 2)
+
             results.append({
-                "id": model_name,
+                "id": model_id.replace("mlx-community/", ""),
+                "full_id": model_id,
                 "size_gb": size_gb,
-                "pull_cmd": f"ouro pull mlx-community/{model_name}",
+                "downloads": m.get("downloads", 0),
+                "pull_cmd": f"ouro pull {model_id}",
             })
+
+        if len(data) < per_page:
+            break
+        page += 1
+        if page > 5:  # cap at 500 models
+            break
+
     return results
+
+
+def _load_hf_cache() -> List[Dict[str, Any]]:
+    """Load HuggingFace model cache from disk, or return empty list."""
+    import json
+    path = _hf_cache_path()
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_hf_cache(models: List[Dict[str, Any]]) -> None:
+    """Save HuggingFace model list to local cache file."""
+    import json
+    import time
+    path = _hf_cache_path()
+    try:
+        with open(path, "w") as f:
+            json.dump({"fetched_at": time.time(), "models": models}, f)
+    except Exception:
+        pass
+
+
+def _hf_cache_is_stale() -> bool:
+    """Return True if cache is missing or older than 24 hours."""
+    import json
+    import time
+    path = _hf_cache_path()
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        fetched_at = data.get("fetched_at", 0)
+        return (time.time() - fetched_at) > 86400  # 24 hours
+    except Exception:
+        return True
+
+
+def _get_hf_models_cached() -> List[Dict[str, Any]]:
+    """Return HuggingFace mlx-community models, refreshing cache if stale."""
+    import json
+    path = _hf_cache_path()
+
+    if _hf_cache_is_stale():
+        # Fetch fresh data
+        fresh = _fetch_hf_models()
+        if fresh:
+            _save_hf_cache(fresh)
+            return fresh
+        # If fetch failed, fall back to stale cache
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            return data.get("models", [])
+        except Exception:
+            return []
+    else:
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            return data.get("models", [])
+        except Exception:
+            return []
+
+
+def _get_recommended_models(ram_gb: float) -> List[Dict[str, Any]]:
+    """Return mlx-community models from HuggingFace that will run fast on this machine.
+
+    Fetches live from HF API and caches locally for 24 hours.
+    Filters to models whose size_gb < 60% of available RAM (green zone).
+    Falls back to a hardcoded list if HF is unreachable and cache is empty.
+    """
+    fast_threshold = ram_gb * 0.60
+
+    # Try live/cached HF data first
+    hf_models = _get_hf_models_cached()
+
+    if hf_models:
+        results = []
+        for m in hf_models:
+            size_gb = m.get("size_gb", 0)
+            # Skip models with unknown size or that are too large
+            if size_gb <= 0 or size_gb > fast_threshold:
+                continue
+            results.append({
+                "id": m["id"],
+                "size_gb": size_gb,
+                "pull_cmd": m["pull_cmd"],
+                "downloads": m.get("downloads", 0),
+            })
+        # Sort by downloads descending, take top 15
+        results.sort(key=lambda x: x["downloads"], reverse=True)
+        return results[:15]
+
+    # Fallback hardcoded list if HF unreachable
+    FALLBACK = [
+        ("gemma-3-1b-it-qat-4bit",      0.7),
+        ("gemma-3-4b-it-qat-4bit",      2.5),
+        ("Qwen3.5-9B-OptiQ-4bit",       5.5),
+        ("gemma-3-12b-it-qat-4bit",     7.5),
+        ("Qwen2.5-14B-Instruct-4bit",   8.5),
+        ("gpt-oss-20b-MXFP4-Q8",       13.0),
+    ]
+    return [
+        {
+            "id": name,
+            "size_gb": size,
+            "pull_cmd": f"ouro pull mlx-community/{name}",
+            "downloads": 0,
+        }
+        for name, size in FALLBACK
+        if size <= fast_threshold
+    ]
 
 
 def _get_installed_models() -> List[Dict[str, Any]]:
@@ -381,6 +520,10 @@ def show_welcome() -> None:
         _ram_gb_rec = psutil.virtual_memory().total / (1024 ** 3)
     except Exception:
         _ram_gb_rec = 0
+
+    # Show a brief status if cache is stale (will fetch from HF)
+    if _hf_cache_is_stale():
+        console.print(Text("  ⟳ Refreshing model list from HuggingFace...", style="dim yellow"))
 
     recommended = _get_recommended_models(_ram_gb_rec)
 
