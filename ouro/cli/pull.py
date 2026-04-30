@@ -7,15 +7,10 @@ Usage:
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.spinner import Spinner
-from rich.live import Live
-from rich.text import Text
 
 console = Console()
 
@@ -57,19 +52,22 @@ def pull_command(
         return
 
     console.print(f"[cyan]Pulling[/cyan] [bold]{repo_id}[/bold] (revision: {revision}) …")
+    console.print(f"[dim]Saving to: {cache_path}[/dim]")
     OURO_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    spinner_text = Text(f"Downloading {repo_id}…")
-
-    with Live(Spinner("dots", text=spinner_text), console=console, refresh_per_second=10):
-        try:
-            local_dir = snapshot_download(
-                repo_id=repo_id,
-                revision=revision,
-                local_dir=str(cache_path),
-            )
-        except Exception as exc:  # pragma: no cover
-            console.print(f"[red]Download failed:[/red] {exc}")
-            raise typer.Exit(code=1)
+    # Use tqdm_class=None so huggingface_hub shows its native per-file progress bars
+    try:
+        local_dir = snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            local_dir=str(cache_path),
+            tqdm_class=None,
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Download interrupted.[/yellow]")
+        raise typer.Exit(code=1)
+    except Exception as exc:
+        console.print(f"[red]Download failed:[/red] {exc}")
+        raise typer.Exit(code=1)
 
     console.print(f"[green]✓ Saved to[/green] {local_dir}")
