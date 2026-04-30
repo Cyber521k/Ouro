@@ -13,7 +13,8 @@ app = typer.Typer(
     name="ouro",
     help="[bold cyan]Ouro[/bold cyan] — MLX-native model runner",
     rich_markup_mode="rich",
-    no_args_is_help=True,
+    no_args_is_help=False,
+    invoke_without_command=True,
 )
 
 console = Console()
@@ -40,6 +41,14 @@ app.command("stop")(stop_command)
 app.command("create")(create_command)
 app.command("ps")(ps_command)
 app.command("scan")(scan_command)
+
+
+@app.callback()
+def main_callback(ctx: typer.Context) -> None:
+    """Ouro — MLX-native model runner for Apple Silicon."""
+    if ctx.invoked_subcommand is None:
+        from ouro.cli.welcome import show_welcome
+        show_welcome()
 
 
 def main() -> None:
