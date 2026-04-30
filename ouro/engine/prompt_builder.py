@@ -97,6 +97,16 @@ def build_prompt(
             if tools is not None:
                 kwargs["tools"] = tools
 
+            # Qwen3 and similar thinking models: pass enable_thinking=True so
+            # the template wraps the reasoning phase in <think>…</think> tags
+            # (which we strip in the API layer).  For models that don't support
+            # this kwarg the template will silently ignore it.
+            try:
+                apply_fn(messages, **{**kwargs, "enable_thinking": True})
+                kwargs["enable_thinking"] = True
+            except Exception:
+                pass  # model doesn't support enable_thinking — skip it
+
             prompt: str = apply_fn(messages, **kwargs)
             return prompt
         except Exception as exc:

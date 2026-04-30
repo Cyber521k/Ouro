@@ -5,6 +5,7 @@ POST /v1/completions       — Legacy completions endpoint.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import AsyncGenerator
@@ -31,6 +32,14 @@ except ImportError:  # pragma: no cover
     raise
 
 router = APIRouter()
+
+# Regex to strip <think>…</think> blocks from generated text before returning via API
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>…</think> reasoning blocks from model output for API responses."""
+    return _THINK_RE.sub("", text).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +118,7 @@ def _chat_non_stream(
     model_id: str,
     prompt: str,
 ) -> ChatCompletionResponse:
-    text = _generate(
+    raw_text = _generate(
         model,
         tokenizer,
         prompt,
@@ -117,6 +126,7 @@ def _chat_non_stream(
         request_data.temperature,
         request_data.top_p,
     )
+    text = _strip_thinking(raw_text)
 
     tool_calls = _parse_tool_calls(text)
 

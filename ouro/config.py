@@ -4,7 +4,7 @@ ouro/config.py — Settings loader for Ouro MLX-native model runner.
 Supports:
 - Load from ~/.ouro/config.yaml
 - Environment variable overrides: OURO_HOST, OURO_PORT, OURO_MODELS
-- Default values: api_host=127.0.0.1, api_port=11434, hub_cache_dir=~/.ouro/models/hub/
+- Default values: api_host=127.0.0.1, api_port=5215, hub_cache_dir=~/.ouro/models/hub/
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = 11434
+_DEFAULT_PORT = 5215
 _DEFAULT_HUB_CACHE_DIR = str(Path("~/.ouro/models/hub/").expanduser())
 _CONFIG_PATH = Path("~/.ouro/config.yaml").expanduser()
 
