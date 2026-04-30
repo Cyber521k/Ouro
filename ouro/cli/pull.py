@@ -46,10 +46,21 @@ def pull_command(
 
     cache_path = _model_cache_path(repo_id)
 
-    # Check if already cached (directory exists and is non-empty)
-    if cache_path.exists() and any(cache_path.iterdir()):
+    # Check if already fully cached — must have at least one weight shard
+    # (*.safetensors or *.bin).  Metadata-only dirs (tokenizer, config) are
+    # not considered a complete download.
+    def _is_fully_cached(path: Path) -> bool:
+        if not path.exists():
+            return False
+        weight_files = list(path.glob("*.safetensors")) + list(path.glob("*.bin"))
+        return len(weight_files) > 0
+
+    if _is_fully_cached(cache_path):
         console.print(f"[green]Already cached[/green] → {cache_path}")
         return
+
+    if cache_path.exists():
+        console.print(f"[yellow]Incomplete cache found[/yellow] (no weight shards) — re-downloading …")
 
     console.print(f"[cyan]Pulling[/cyan] [bold]{repo_id}[/bold] (revision: {revision}) …")
     console.print(f"[dim]Saving to: {cache_path}[/dim]")
