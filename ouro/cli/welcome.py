@@ -97,6 +97,43 @@ def _get_ouro_title() -> str:
     return OURO_FALLBACK_TITLE
 
 
+def _get_recommended_models(ram_gb: float) -> List[Dict[str, Any]]:
+    """Return a curated list of popular mlx-community models that run fast on this machine.
+
+    Size estimates are approximate (4-bit quantized).  Models are filtered to
+    those whose size_gb < 60 % of available RAM so they earn a green bar.
+    """
+    # (name, approx_size_gb)  — all from mlx-community on HuggingFace
+    CATALOG = [
+        ("gemma-3-1b-it-qat-4bit",           0.7),
+        ("parakeet-tdt-0.6b-v3",              0.6),
+        ("Kokoro-82M-bf16",                   0.2),
+        ("gemma-3-4b-it-qat-4bit",            2.5),
+        ("Qwen3.5-9B-OptiQ-4bit",             5.5),
+        ("Qwen3.5-9B-MLX-4bit",               5.5),
+        ("gemma-3-12b-it-qat-4bit",           7.5),
+        ("Qwen2.5-14B-Instruct-4bit",         8.5),
+        ("gpt-oss-20b-MXFP4-Q8",            13.0),
+        ("gemma-3-27b-it-qat-4bit",          16.5),
+        ("gemma-4-26b-a4b-it-4bit",          16.0),
+        ("Qwen3-30B-A3B-4bit",               18.5),
+        ("Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-4bit", 17.0),
+        ("gemma-4-31b-it-4bit",              19.0),
+        ("Devstral-Small-2-24B-Instruct-2512-4bit", 15.0),
+    ]
+
+    fast_threshold = ram_gb * 0.60  # green zone
+    results = []
+    for model_name, size_gb in CATALOG:
+        if size_gb <= fast_threshold:
+            results.append({
+                "id": model_name,
+                "size_gb": size_gb,
+                "pull_cmd": f"ouro pull mlx-community/{model_name}",
+            })
+    return results
+
+
 def _get_installed_models() -> List[Dict[str, Any]]:
     """Return list of installed models from the registry, or empty list on error."""
     try:
@@ -337,7 +374,41 @@ def show_welcome() -> None:
     console.print()
 
     # -----------------------------------------------------------------------
-    # 4. Installed models table
+    # 4. Recommended models (HuggingFace mlx-community, fast on this machine)
+    # -----------------------------------------------------------------------
+    try:
+        import psutil
+        _ram_gb_rec = psutil.virtual_memory().total / (1024 ** 3)
+    except Exception:
+        _ram_gb_rec = 0
+
+    recommended = _get_recommended_models(_ram_gb_rec)
+
+    console.print(Rule(
+        title="[bold yellow]◈ Recommended Models (runs fast on your machine)[/bold yellow]",
+        style=brown_border,
+    ))
+    console.print()
+
+    if recommended:
+        for rec in recommended:
+            size_str = f"{rec['size_gb']:.1f} GB"
+            bar = _model_perf_bar(rec["size_gb"] * 1024, _ram_gb_rec)
+            line = Text()
+            line.append("  ● ", style="bold green")
+            line.append(f"{rec['id']}", style="cyan")
+            line.append(f"    {size_str}", style="green")
+            line.append("    ")
+            line.append(f"{rec['pull_cmd']}", style="dim yellow")
+            line.append_text(bar)
+            console.print(line)
+    else:
+        console.print(Text("  No recommendations available for your RAM size.", style="dim"))
+
+    console.print()
+
+    # -----------------------------------------------------------------------
+    # 5. Installed models table
     # -----------------------------------------------------------------------
     console.print(Rule(
         title="[bold yellow]◈ Installed Models[/bold yellow]",
