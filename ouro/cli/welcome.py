@@ -21,35 +21,55 @@ from rich.text import Text
 # ASCII art assets
 # ---------------------------------------------------------------------------
 
-# Eye + snakes ASCII art (detailed — two snakes coiled around a central eye)
+# Block-style spiral/eye logo
 EYE_SNAKES_ART = r"""
-      /\   ,'`-.        .-'`\   /\
-     /  `~(  ( o)~~)~~((o )  )~'  \
-    / ,-'  |  `~=~'    `~=~'  | `-.\ 
-   / /  _.-\   /~~~~~~~~~~~~~~\  /-._\ \
-  | | ,'   _> |  .==========.  | <_   `.| 
-  | |/  ,-'   | //  O U R O \\ |   `-, \| 
-  |  \ /  ,-.  \|| ,========. ||/  ,-. / |
-  |  |Y  / __|  || |  #  #  | ||  |__ \ Y|
- /   ||  \(  )\ || |  # # #  | || /(  )/  ||   \
-|  ,-'|   `--'  || |#########| ||  `--'   |`-.  |
-|  \  |  snake  || \=========/ ||  snake  |  /  |
-|   \ | ~~~~~~~  \\  `-------'  // ~~~~~~~| /   |
- \   `|  (o  o)   `\___________/'  (o  o) |'   /
-  \   \   \  /   ,~~~~|=====|~~~~.   \  /   /  /
-   \   `.  \/  ,'  /  |     |  \  `.  \/  ,'  /
-    \    `-.  /  /   ||  @  ||   \  \  .-'   /
-     \      `/ ,'    ||.   .||    `. \/`    /
-      `\    / /  _   |' `-' `|   _  \ \   /'
-        `--' | ( )  / \     / \  ( ) | `--'
-             |  `-./   `---'   \.-'  |
-             \    /  ,-. .-. ,-.\ .  /
-              \  / ,' `Y' `Y' `. \  /
-               \/  /   |   |   \ \/
-               /  / ,--'   `--. \ \
-              /  /  \  OURO  /  \ \
-             /  /    `------'    \ \
-            `--'                  `--'"""
+                                                               
+                                                               
+                                                               
+                                                               
+                                                               
+                ██████████████████████                         
+          ██████████████████████████████████                   
+         ██   █████████████████████████████████░               
+        ███  ░████████████████████████████████████             
+        ██████ ████████           ▓█████████████████           
+       ████████ █████                    █████████████         
+      ███████    ░███                       ████████████       
+  ██████████     ████                         ███████████      
+█ ░██████      ██████                           ██████████     
+ ██████  ██   ███████                            ██████████    
+     ▒  ██    ██████                              ██████████   
+       ██░  ██████                                 █████████   
+      ███                                           █████████  
+      ███                                            ████████  
+      ███                                             ████████ 
+     ███                                              ████████ 
+     ██▒                                               ████████
+    ███                                                ████████
+    ███                                                ████████
+    ███                                                ████████
+    ███                                                ████████
+    ███                                                ███████ 
+    ████                                              ████████ 
+    ▓███                                             ████████░ 
+     ███░                                            ████████  
+     ████                                           ████████   
+     ▒████                                         ████████    
+      ▓████                                       ████████     
+       █████                                     ████████      
+        ▓█████                                 █████████       
+         ░█████                               █████████        
+           ██████                          ███████████         
+            ████████                   ██████████████          
+              ████████████     ▒░█████████████████             
+                 ███████████████████████████████               
+                     ▓██████████████████████                   
+                                                               
+                                                               
+                                                               
+                                                               
+                                                               """
+
 
 # Fallback big "OURO" title if pyfiglet is unavailable
 OURO_FALLBACK_TITLE = r"""
@@ -65,7 +85,6 @@ def _get_ouro_title() -> str:
     """Return a big block-font 'OURO' title string."""
     try:
         import pyfiglet  # type: ignore[import]
-        # Try preferred fonts, fall back gracefully
         for font in ("banner3", "doom", "block", "standard"):
             try:
                 rendered = pyfiglet.figlet_format("OURO", font=font)
@@ -116,7 +135,6 @@ def show_welcome() -> None:
     title = Text(title_text, style=amber, justify="center")
     console.print(title)
 
-    # Sub-tagline
     tagline = Text(
         "  ◈  MLX-Native Model Runner for Apple Silicon  ◈  ",
         style=gold,
@@ -126,7 +144,7 @@ def show_welcome() -> None:
     console.print()
 
     # -----------------------------------------------------------------------
-    # 2. Left panel: ASCII art logo
+    # 2. Logo panel (full width)
     # -----------------------------------------------------------------------
     logo_text = Text(EYE_SNAKES_ART, style=amber, justify="center")
     logo_panel = Panel(
@@ -134,11 +152,13 @@ def show_welcome() -> None:
         title="[dim yellow]∴ ouro ∴[/dim yellow]",
         border_style=brown_border,
         padding=(0, 1),
-        expand=False,
+        expand=True,
     )
+    console.print(logo_panel)
+    console.print()
 
     # -----------------------------------------------------------------------
-    # 3. Right panel: System info + capabilities
+    # 3. System info panel
     # -----------------------------------------------------------------------
     version = _get_version()
 
@@ -174,14 +194,12 @@ def show_welcome() -> None:
 
     info_panel = Panel(
         info_lines,
-        title=f"[bold yellow]◈ System Info[/bold yellow]",
+        title="[bold yellow]◈ System Info[/bold yellow]",
         border_style=brown_border,
         padding=(0, 2),
         expand=True,
     )
-
-    # Render the two panels side-by-side
-    console.print(Columns([logo_panel, info_panel], equal=False, expand=True))
+    console.print(info_panel)
     console.print()
 
     # -----------------------------------------------------------------------
