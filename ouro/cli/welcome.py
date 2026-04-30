@@ -115,6 +115,56 @@ def _get_version() -> str:
         return "0.1.0"
 
 
+def _model_perf_bar(size_mb: float, ram_gb: float) -> Text:
+    """Return a small color bar showing how well a model will run on this machine.
+
+    Layout:  [██░░░░]
+      red    = won't run  (model > 90% RAM)
+      orange = slow       (model 60–90% RAM)
+      green  = fast       (model < 60% RAM)
+    """
+    bar_width = 6
+    model_gb = size_mb / 1024 if size_mb else 0
+
+    if ram_gb <= 0:
+        # Can't determine — show neutral grey bar
+        bar = Text()
+        bar.append(" [", style="dim")
+        bar.append("░" * bar_width, style="dim")
+        bar.append("]", style="dim")
+        return bar
+
+    ratio = model_gb / ram_gb  # 0.0 → 1.0+
+
+    if ratio >= 0.9:
+        # Red — won't run
+        filled = bar_width
+        color = "bold red"
+        label = " ✗"
+        label_style = "bold red"
+    elif ratio >= 0.6:
+        # Orange — will run slow
+        filled = round(bar_width * ratio)
+        color = "bold yellow"
+        label = " ~"
+        label_style = "bold yellow"
+    else:
+        # Green — will run fast
+        filled = round(bar_width * ratio)
+        color = "bold green"
+        label = " ✓"
+        label_style = "bold green"
+
+    empty = bar_width - filled
+    bar = Text()
+    bar.append(" [", style="dim")
+    bar.append("█" * filled, style=color)
+    bar.append("░" * empty, style="dim")
+    bar.append("]", style="dim")
+    bar.append(label, style=label_style)
+    return bar
+
+
 def _get_machine_info() -> dict:
     """Auto-detect machine hardware, OS, CPU, RAM, and GPU/chip info."""
     import platform
@@ -310,6 +360,13 @@ def show_welcome() -> None:
         )
         console.print(no_models_panel)
     else:
+        # Get RAM for perf bar
+        try:
+            import psutil
+            _ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        except Exception:
+            _ram_gb = 0
+
         for model in models:
             name = str(model.get("id", ""))
             size_mb = model.get("size_mb", 0)
@@ -325,6 +382,7 @@ def show_welcome() -> None:
             line.append(f"{name}", style="cyan")
             line.append(f"    {size_str}", style="green")
             line.append(f"    {modified}", style="dim magenta")
+            line.append_text(_model_perf_bar(size_mb if isinstance(size_mb, (int, float)) else 0, _ram_gb))
             console.print(line)
 
     console.print()
