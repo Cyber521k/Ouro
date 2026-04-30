@@ -4,6 +4,11 @@ ouro/engine/generate.py — Text generation helpers wrapping mlx_lm.
 Provides:
 - generate()        — full response as a string
 - generate_stream() — token-by-token iterator
+
+mlx_lm >= 0.21 moved sampling params out of generate_step() into a
+`sampler=` callable.  Use mlx_lm.sample_utils.make_sampler() to build
+the sampler, then pass sampler= and logits_processors= to stream_generate /
+generate_step.  Do NOT pass temp=/top_p= directly — those args were removed.
 """
 
 from __future__ import annotations
@@ -13,12 +18,42 @@ from typing import Any, Iterator
 
 try:
     import mlx_lm
+    from mlx_lm.sample_utils import make_sampler, make_repetition_penalty
     _MLX_AVAILABLE = True
 except ImportError:
     mlx_lm = None  # type: ignore[assignment]
     _MLX_AVAILABLE = False
 
 log = logging.getLogger("ouro.engine.generate")
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_kwargs(
+    temperature: float,
+    top_p: float,
+    min_p: float,
+    repetition_penalty: float,
+) -> dict[str, Any]:
+    """Build the kwargs dict for stream_generate / generate_step.
+
+    mlx_lm >=0.21 expects a ``sampler=`` callable (built via make_sampler)
+    and an optional ``logits_processors=`` list instead of raw temp/top_p args.
+    """
+    sampler = make_sampler(
+        temp=temperature,
+        top_p=top_p,
+        min_p=min_p,
+    )
+    kwargs: dict[str, Any] = {"sampler": sampler}
+
+    if repetition_penalty != 1.0:
+        kwargs["logits_processors"] = [make_repetition_penalty(repetition_penalty)]
+
+    return kwargs
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -76,34 +111,16 @@ def generate(
         len(prompt),
     )
 
-    # mlx_lm.generate accepts keyword arguments for sampling parameters.
-    # The exact kwarg names may differ between releases; we try the most
-    # common interface first and fall back gracefully.
-    try:
-        extra: dict[str, Any] = {}
-        if min_p > 0.0:
-            extra["min_p"] = min_p
-        if repetition_penalty != 1.0:
-            extra["repetition_penalty"] = repetition_penalty
+    sampling_kwargs = _build_kwargs(temperature, top_p, min_p, repetition_penalty)
 
-        response: str = mlx_lm.generate(
-            model,
-            tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temp=temperature,
-            top_p=top_p,
-            verbose=False,
-            **extra,
-        )
-    except TypeError:
-        # Older / newer API that doesn't accept verbose= or uses different names
-        response = mlx_lm.generate(
-            model,
-            tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-        )
+    response: str = mlx_lm.generate(
+        model,
+        tokenizer,
+        prompt=prompt,
+        max_tokens=max_tokens,
+        verbose=False,
+        **sampling_kwargs,
+    )
 
     return response
 
@@ -157,58 +174,32 @@ def generate_stream(
         top_p,
     )
 
-    # mlx_lm.stream_generate is the standard streaming API.
-    # Fall back to mlx_lm.generate_step if stream_generate is unavailable.
+    sampling_kwargs = _build_kwargs(temperature, top_p, min_p, repetition_penalty)
+    sampling_kwargs.update(kwargs)
+
     stream_fn = getattr(mlx_lm, "stream_generate", None)
     if stream_fn is not None:
-        extra: dict[str, Any] = {}
-        if min_p > 0.0:
-            extra["min_p"] = min_p
-        if repetition_penalty != 1.0:
-            extra["repetition_penalty"] = repetition_penalty
-
         for token_response in stream_fn(
             model,
             tokenizer,
             prompt=prompt,
             max_tokens=max_tokens,
-            temp=temperature,
-            top_p=top_p,
-            **extra,
-            **kwargs,
+            **sampling_kwargs,
         ):
-            # stream_generate yields objects with a .text attribute
             if hasattr(token_response, "text"):
                 yield token_response.text
             else:
                 yield str(token_response)
     else:
-        # Fallback: use generate_step (lower-level token-by-token iterator)
-        generate_step_fn = getattr(mlx_lm, "generate_step", None)
-        if generate_step_fn is None:
-            # Last resort: run full generate and yield in one chunk
-            log.warning(
-                "mlx_lm has no streaming API; falling back to full generation."
-            )
-            yield generate(
-                model,
-                tokenizer,
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-            )
-            return
-
-        # generate_step yields (token_id, logprobs) tuples
-        for token_id, _logprobs in generate_step_fn(
-            prompt,
+        # Fallback: full generate yielded as one chunk
+        log.warning("mlx_lm has no streaming API; falling back to full generation.")
+        yield generate(
             model,
-            temp=temperature,
+            tokenizer,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
             top_p=top_p,
-        ):
-            token_str = tokenizer.decode([token_id])
-            yield token_str
-            max_tokens -= 1
-            if max_tokens <= 0:
-                break
+            min_p=min_p,
+            repetition_penalty=repetition_penalty,
+        )
