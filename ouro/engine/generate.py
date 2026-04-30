@@ -186,10 +186,16 @@ def generate_stream(
             max_tokens=max_tokens,
             **sampling_kwargs,
         ):
-            if hasattr(token_response, "text"):
-                yield token_response.text
+            # Stop as soon as mlx_lm signals end-of-sequence —
+            # avoids emitting a spurious empty token after EOS.
+            finish = getattr(token_response, "finish_reason", None)
+            text = getattr(token_response, "text", None)
+            if text is not None:
+                yield text
             else:
                 yield str(token_response)
+            if finish is not None:
+                break
     else:
         # Fallback: full generate yielded as one chunk
         log.warning("mlx_lm has no streaming API; falling back to full generation.")

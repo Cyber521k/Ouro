@@ -25,8 +25,17 @@ log = logging.getLogger("ouro.engine.tool_parser")
 # ---------------------------------------------------------------------------
 
 # 1. <tool_call> … </tool_call>
+# Use a non-greedy match for the JSON body so multiple calls are captured
+# individually.  The outer \s* tolerates whitespace/newlines around the JSON.
 _RE_XML_TOOL_CALL = re.compile(
     r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Some Hermes/Qwen3 variants emit <tool_call>{...} with no closing tag —
+# capture those too as a best-effort fallback.
+_RE_XML_TOOL_CALL_UNCLOSED = re.compile(
+    r"<tool_call>\s*(\{[^<]+\})",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -142,8 +151,14 @@ def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _extract_xml_tool_calls(text: str) -> List[Dict[str, Any]]:
-    """Extract tool calls from <tool_call>…</tool_call> tags."""
+    """Extract tool calls from <tool_call>…</tool_call> tags.
+
+    Falls back to unclosed-tag pattern for models that emit
+    ``<tool_call>{...}`` without a closing tag.
+    """
     results: List[Dict[str, Any]] = []
+
+    # Primary: properly closed tags
     for match in _RE_XML_TOOL_CALL.finditer(text):
         raw = _try_parse_json(match.group(1))
         if raw is None:
@@ -152,6 +167,23 @@ def _extract_xml_tool_calls(text: str) -> List[Dict[str, Any]]:
         call = _to_openai_tool_call(raw)
         if call:
             results.append(call)
+
+    if results:
+        return results
+
+    # Fallback: unclosed <tool_call>{...} pattern (some Hermes/Qwen3 outputs)
+    for match in _RE_XML_TOOL_CALL_UNCLOSED.finditer(text):
+        # Try balanced-brace extraction first for reliability
+        idx = text.find("{", match.start())
+        blob = _extract_balanced_json(text, idx) if idx != -1 else match.group(1)
+        raw = _try_parse_json(blob or match.group(1))
+        if raw is None:
+            log.debug("Unclosed XML tool_call block contained invalid JSON: %s", match.group(1))
+            continue
+        call = _to_openai_tool_call(raw)
+        if call:
+            results.append(call)
+
     return results
 
 

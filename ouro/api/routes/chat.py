@@ -25,7 +25,11 @@ try:
         Choice,
         CompletionRequest,
         Delta,
+        DeltaFunctionCall,
+        DeltaToolCall,
+        FunctionCall,
         StreamChoice,
+        ToolCall,
         Usage,
     )
 except ImportError:  # pragma: no cover
@@ -103,6 +107,34 @@ def _parse_tool_calls(text: str) -> list | None:
         return None
 
 
+def _raw_to_tool_call(raw: dict, index: int = 0) -> ToolCall:
+    """Convert a raw tool_parser dict to a typed ToolCall schema object."""
+    fn = raw.get("function", {})
+    return ToolCall(
+        index=index,
+        id=raw.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+        type=raw.get("type", "function"),
+        function=FunctionCall(
+            name=fn.get("name", ""),
+            arguments=fn.get("arguments", "{}"),
+        ),
+    )
+
+
+def _raw_to_delta_tool_call(raw: dict, index: int = 0) -> DeltaToolCall:
+    """Convert a raw tool_parser dict to a DeltaToolCall for streaming."""
+    fn = raw.get("function", {})
+    return DeltaToolCall(
+        index=index,
+        id=raw.get("id", f"call_{uuid.uuid4().hex[:24]}"),
+        type=raw.get("type", "function"),
+        function=DeltaFunctionCall(
+            name=fn.get("name", ""),
+            arguments=fn.get("arguments", "{}"),
+        ),
+    )
+
+
 def _sse(data: str) -> str:
     return f"data: {data}\n\n"
 
@@ -128,17 +160,18 @@ def _chat_non_stream(
     )
     text = _strip_thinking(raw_text)
 
-    tool_calls = _parse_tool_calls(text)
+    raw_tool_calls = _parse_tool_calls(text)
 
-    if tool_calls:
-        message = ChatMessage(role="assistant", content=None, tool_calls=tool_calls)
+    if raw_tool_calls:
+        # Convert raw dicts → typed ToolCall objects with proper index
+        typed_calls = [_raw_to_tool_call(tc, i) for i, tc in enumerate(raw_tool_calls)]
+        message = ChatMessage(role="assistant", content=None, tool_calls=typed_calls)
         finish_reason = "tool_calls"
     else:
         message = ChatMessage(role="assistant", content=text)
         finish_reason = "stop"
 
-    prompt_text = prompt
-    usage = Usage.from_texts(prompt_text, text)
+    usage = Usage.from_texts(prompt, text)
 
     return ChatCompletionResponse(
         id=_completion_id(),
@@ -147,6 +180,7 @@ def _chat_non_stream(
         model=model_id,
         choices=[Choice(index=0, message=message, finish_reason=finish_reason)],
         usage=usage,
+        system_fingerprint=None,
     )
 
 
@@ -164,7 +198,7 @@ async def _chat_stream_generator(
     completion_id = _completion_id()
     created = _now()
 
-    # First chunk: role only
+    # First chunk: role announcement
     first_chunk = ChatCompletionChunk(
         id=completion_id,
         object="chat.completion.chunk",
@@ -172,9 +206,9 @@ async def _chat_stream_generator(
         model=model_id,
         choices=[StreamChoice(index=0, delta=Delta(role="assistant"), finish_reason=None)],
     )
-    yield _sse(first_chunk.model_dump_json())
+    yield _sse(first_chunk.model_dump_json(exclude_none=True))
 
-    # Stream tokens
+    # Stream tokens — buffer full output so we can detect tool calls
     token_stream = _generate_stream(
         model,
         tokenizer,
@@ -188,32 +222,19 @@ async def _chat_stream_generator(
     try:
         for token in token_stream:
             full_text += token
-            chunk = ChatCompletionChunk(
-                id=completion_id,
-                object="chat.completion.chunk",
-                created=created,
-                model=model_id,
-                choices=[StreamChoice(index=0, delta=Delta(content=token), finish_reason=None)],
-            )
-            yield _sse(chunk.model_dump_json())
     except Exception as exc:
         error_payload = json.dumps({"error": {"message": str(exc), "type": "server_error"}})
         yield _sse(error_payload)
         yield "data: [DONE]\n\n"
         return
 
-    # Determine finish reason after full text is buffered.
-    # Strip thinking block before parsing tool calls.
+    # Strip thinking block, then detect tool calls
     clean_text = _strip_thinking(full_text)
-    tool_calls = _parse_tool_calls(clean_text)
+    raw_tool_calls = _parse_tool_calls(clean_text)
 
-    if tool_calls:
-        # When tool calls are detected we:
-        # 1. Suppress the raw streamed content (already sent as tokens above —
-        #    we need to tell the client to discard it and use the tool_calls
-        #    instead).  We do this by sending a final chunk with finish_reason
-        #    "tool_calls" and the parsed calls in the delta.
-        # 2. Send finish chunk BEFORE [DONE] so the client processes it.
+    if raw_tool_calls:
+        # Tool call path: send structured chunk with index-wrapped DeltaToolCall list
+        delta_tool_calls = [_raw_to_delta_tool_call(tc, i) for i, tc in enumerate(raw_tool_calls)]
         tool_chunk = ChatCompletionChunk(
             id=completion_id,
             object="chat.completion.chunk",
@@ -222,13 +243,24 @@ async def _chat_stream_generator(
             choices=[
                 StreamChoice(
                     index=0,
-                    delta=Delta(role="assistant", content=None, tool_calls=tool_calls),
+                    delta=Delta(role="assistant", content=None, tool_calls=delta_tool_calls),
                     finish_reason="tool_calls",
                 )
             ],
         )
-        yield _sse(tool_chunk.model_dump_json())
+        yield _sse(tool_chunk.model_dump_json(exclude_none=True))
     else:
+        # Normal text path: send content then stop
+        content_chunk = ChatCompletionChunk(
+            id=completion_id,
+            object="chat.completion.chunk",
+            created=created,
+            model=model_id,
+            choices=[StreamChoice(index=0, delta=Delta(content=clean_text), finish_reason=None)],
+        )
+        yield _sse(content_chunk.model_dump_json(exclude_none=True))
+
+        # Stop chunk
         final_chunk = ChatCompletionChunk(
             id=completion_id,
             object="chat.completion.chunk",
@@ -236,7 +268,7 @@ async def _chat_stream_generator(
             model=model_id,
             choices=[StreamChoice(index=0, delta=Delta(), finish_reason="stop")],
         )
-        yield _sse(final_chunk.model_dump_json())
+        yield _sse(final_chunk.model_dump_json(exclude_none=True))
 
     yield "data: [DONE]\n\n"
 
@@ -262,6 +294,11 @@ async def chat_completions(request_data: ChatCompletionRequest, request: Request
         return StreamingResponse(
             _chat_stream_generator(request_data, model, tokenizer, model_id, prompt),
             media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
         )
 
     return _chat_non_stream(request_data, model, tokenizer, model_id, prompt)
@@ -299,6 +336,11 @@ async def legacy_completions(request_data: CompletionRequest, request: Request):
         return StreamingResponse(
             _chat_stream_generator(chat_req, model, tokenizer, model_id, prompt),
             media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
         )
 
     # Non-streaming: return legacy text field format
@@ -310,6 +352,7 @@ async def legacy_completions(request_data: CompletionRequest, request: Request):
         request_data.temperature,
         request_data.top_p,
     )
+    text = _strip_thinking(text)
     usage = Usage.from_texts(prompt, text)
     completion_id = _completion_id()
 

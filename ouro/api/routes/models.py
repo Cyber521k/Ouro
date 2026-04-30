@@ -4,6 +4,7 @@ GET /v1/models — returns all installed models known to the registry.
 from __future__ import annotations
 
 import time
+from datetime import datetime
 
 try:
     from fastapi import APIRouter, Request
@@ -30,10 +31,10 @@ async def list_models(request: Request) -> ModelListResponse:
 
         installed = registry_storage.list_installed_models()
         for entry in installed:
-            # entry is expected to have .model_id and .modified (datetime)
-            model_id = entry.model_id
+            # entry is a plain dict with keys: id, path, size_mb, modified (ISO string)
+            model_id = entry["id"]
             try:
-                created = int(entry.modified.timestamp())
+                created = int(datetime.fromisoformat(entry["modified"]).timestamp())
             except Exception:
                 created = int(time.time())
 

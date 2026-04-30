@@ -72,7 +72,7 @@ def create_app(model: object, tokenizer: object, model_id: str) -> "FastAPI":
     return app
 
 
-def run_server(app: "FastAPI", host: str = "127.0.0.1", port: int = 8000) -> None:
+def run_server(app: "FastAPI", host: str = "127.0.0.1", port: int = 5215) -> None:
     """
     Start the Uvicorn server synchronously.
 
