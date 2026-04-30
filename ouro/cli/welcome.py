@@ -115,6 +115,80 @@ def _get_version() -> str:
         return "0.1.0"
 
 
+def _get_machine_info() -> dict:
+    """Auto-detect machine hardware, OS, CPU, RAM, and GPU/chip info."""
+    import platform
+    import sys
+
+    info: dict = {}
+
+    # OS / platform
+    system = platform.system()
+    info["os"] = f"{system} {platform.release()}"
+
+    # CPU
+    info["cpu"] = platform.processor() or platform.machine()
+
+    # RAM
+    try:
+        import psutil
+        ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+        info["ram"] = f"{ram_gb:.0f} GB"
+    except ImportError:
+        info["ram"] = "unknown"
+
+    # Apple Silicon detection (chip name + GPU cores)
+    info["chip"] = None
+    info["gpu"] = None
+    if system == "Darwin":
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True, text=True, timeout=3
+            )
+            chip = result.stdout.strip()
+            if chip:
+                info["chip"] = chip
+        except Exception:
+            pass
+
+        # Try system_profiler for Apple Silicon GPU core count
+        try:
+            import subprocess, json
+            result = subprocess.run(
+                ["system_profiler", "SPHardwareDataType", "-json"],
+                capture_output=True, text=True, timeout=5
+            )
+            data = json.loads(result.stdout)
+            hw = data.get("SPHardwareDataType", [{}])[0]
+            # chip name from system_profiler (more reliable on M-series)
+            chip_sp = hw.get("chip_type") or hw.get("cpu_type", "")
+            if chip_sp and not info["chip"]:
+                info["chip"] = chip_sp
+            elif chip_sp:
+                info["chip"] = chip_sp  # prefer system_profiler name
+            # GPU cores
+            gpu_cores = hw.get("number_processors", "")
+            # Look for graphics info
+            result2 = subprocess.run(
+                ["system_profiler", "SPDisplaysDataType", "-json"],
+                capture_output=True, text=True, timeout=5
+            )
+            disp = json.loads(result2.stdout)
+            gpu_data = disp.get("SPDisplaysDataType", [{}])[0]
+            gpu_name = gpu_data.get("sppci_model", "") or gpu_data.get("_name", "")
+            if gpu_name:
+                info["gpu"] = gpu_name
+        except Exception:
+            pass
+
+    # Python version
+    info["python"] = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+
+    return info
+
+
 # ---------------------------------------------------------------------------
 # Main welcome renderer
 # ---------------------------------------------------------------------------
@@ -161,13 +235,23 @@ def show_welcome() -> None:
     # 3. System info panel
     # -----------------------------------------------------------------------
     version = _get_version()
+    machine = _get_machine_info()
 
     info_lines = Text(justify="left")
     info_lines.append(f"Ouro  v{version}\n", style=amber)
     info_lines.append("─" * 30 + "\n", style=dim_gold)
     info_lines.append("\n")
-    info_lines.append("Platform  ", style="dim")
-    info_lines.append("Apple Silicon (MLX-native)\n", style=gold)
+    info_lines.append("OS        ", style="dim")
+    info_lines.append(f"{machine['os']}\n", style=gold)
+    info_lines.append("Chip      ", style="dim")
+    info_lines.append(f"{machine['chip'] or machine['cpu']}\n", style=gold)
+    info_lines.append("RAM       ", style="dim")
+    info_lines.append(f"{machine['ram']}\n", style=gold)
+    if machine.get("gpu"):
+        info_lines.append("GPU       ", style="dim")
+        info_lines.append(f"{machine['gpu']}\n", style=gold)
+    info_lines.append("Python    ", style="dim")
+    info_lines.append(f"{machine['python']}\n", style=gold)
     info_lines.append("Backend   ", style="dim")
     info_lines.append("mlx-lm / GGUF\n", style=gold)
     info_lines.append("API       ", style="dim")
