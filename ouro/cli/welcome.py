@@ -149,7 +149,7 @@ def _fetch_hf_models() -> List[Dict[str, Any]]:
     while True:
         url = (
             f"https://huggingface.co/api/models"
-            f"?author=mlx-community&limit={per_page}&offset={(page-1)*per_page}"
+            f"?author=mlx-community&filter=mlx&limit={per_page}&offset={(page-1)*per_page}"
             f"&sort=downloads&direction=-1"
         )
         try:
@@ -164,6 +164,13 @@ def _fetch_hf_models() -> List[Dict[str, Any]]:
 
         for m in data:
             model_id = m.get("id", "")
+            # Skip non-MLX repos (GGUF, safetensors-only, datasets, etc.)
+            tags = m.get("tags", [])
+            if "mlx" not in tags and not any("mlx" in t.lower() for t in tags):
+                # Fall back to name check — mlx-community repos nearly always have mlx tag
+                # but if the tag list is empty we allow it (tag may not be indexed yet)
+                if tags:  # non-empty tag list with no mlx tag → skip
+                    continue
             # estimate size from model name (e.g. 7B-4bit -> ~4GB, 27B-4bit -> ~14GB)
             size_gb = _estimate_size_from_name(model_id)
 
