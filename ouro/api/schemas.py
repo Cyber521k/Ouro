@@ -35,7 +35,7 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: str | dict[str, Any] | None = None
     stream: bool = False
     temperature: float = 0.7
-    max_tokens: int = 512
+    max_tokens: int = 8192
     top_p: float = 0.9
 
 
@@ -111,6 +111,7 @@ class ModelListResponse(BaseModel):
 class Delta(BaseModel):
     role: str | None = None
     content: str | None = None
+    tool_calls: list[Any] | None = None
 
 
 class StreamChoice(BaseModel):

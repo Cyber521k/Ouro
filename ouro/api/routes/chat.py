@@ -203,9 +203,9 @@ async def _chat_stream_generator(
         return
 
     # Determine finish reason after full text is buffered
-    tool_calls = _parse_tool_calls(full_text)
+    tool_calls = _parse_tool_calls(_strip_thinking(full_text))
     if tool_calls:
-        # Emit a final chunk carrying tool_call info
+        # Emit a final chunk carrying tool_call info in the delta
         tool_chunk = ChatCompletionChunk(
             id=completion_id,
             object="chat.completion.chunk",
@@ -214,7 +214,7 @@ async def _chat_stream_generator(
             choices=[
                 StreamChoice(
                     index=0,
-                    delta=Delta(content=None),
+                    delta=Delta(content=None, tool_calls=tool_calls),
                     finish_reason="tool_calls",
                 )
             ],
