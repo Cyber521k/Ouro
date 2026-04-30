@@ -29,6 +29,7 @@ from ouro.cli.run import run_command  # noqa: E402
 from ouro.cli.serve import serve_command, stop_command  # noqa: E402
 from ouro.cli.create import create_command  # noqa: E402
 from ouro.cli.ps import ps_command  # noqa: E402
+from ouro.cli.scan import scan_command  # noqa: E402
 
 app.command("pull")(pull_command)
 app.command("list")(list_command)
@@ -38,6 +39,7 @@ app.command("serve")(serve_command)
 app.command("stop")(stop_command)
 app.command("create")(create_command)
 app.command("ps")(ps_command)
+app.command("scan")(scan_command)
 
 
 def main() -> None:

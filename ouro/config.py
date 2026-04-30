@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 try:
     import yaml
@@ -44,6 +44,9 @@ class OuroConfig:
     api_host: str = _DEFAULT_HOST
     api_port: int = _DEFAULT_PORT
     hub_cache_dir: str = _DEFAULT_HUB_CACHE_DIR
+    scan_paths: List[str] = field(default_factory=list)
+    # HuggingFace token — enables gated models and higher download rate limits
+    hf_token: Optional[str] = None
 
     # -----------------------------------------------------------------------
     # Derived helpers
@@ -75,6 +78,15 @@ def _load_yaml_config(path: Path) -> dict:
         return {}
 
 
+def _nested_get(d: dict, *keys: str):
+    """Safely traverse nested dict keys; return None if any key is missing."""
+    for key in keys:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(key)  # type: ignore[assignment]
+    return d
+
+
 def load_config(config_path: Optional[Path] = None) -> OuroConfig:
     """
     Build and return an :class:`OuroConfig` instance, merging (in order):
@@ -92,6 +104,8 @@ def load_config(config_path: Optional[Path] = None) -> OuroConfig:
         api_host=file_cfg.get("api_host", _DEFAULT_HOST),
         api_port=int(file_cfg.get("api_port", _DEFAULT_PORT)),
         hub_cache_dir=file_cfg.get("hub_cache_dir", _DEFAULT_HUB_CACHE_DIR),
+        scan_paths=list(file_cfg.get("scan_paths", [])),
+        hf_token=_nested_get(file_cfg, "huggingface", "token"),
     )
 
     # Environment variable overrides
@@ -110,6 +124,14 @@ def load_config(config_path: Optional[Path] = None) -> OuroConfig:
     if env_models:
         cfg.hub_cache_dir = env_models
 
+    env_hf_token = os.environ.get("HF_TOKEN")
+    if env_hf_token:
+        cfg.hf_token = env_hf_token
+
+    # Propagate HF token to environment so huggingface-hub picks it up
+    if cfg.hf_token:
+        os.environ.setdefault("HF_TOKEN", cfg.hf_token)
+
     return cfg
 
 
@@ -122,13 +144,17 @@ def save_config(cfg: OuroConfig, config_path: Optional[Path] = None) -> None:
     path = config_path if config_path is not None else _CONFIG_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    data = {
+    data: dict = {
         "api_host": cfg.api_host,
         "api_port": cfg.api_port,
         "hub_cache_dir": cfg.hub_cache_dir,
     }
     if cfg.default_model is not None:
         data["default_model"] = cfg.default_model
+    if cfg.scan_paths:
+        data["scan_paths"] = list(cfg.scan_paths)
+    if cfg.hf_token:
+        data["huggingface"] = {"token": cfg.hf_token}
 
     with path.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(data, fh, default_flow_style=False)
