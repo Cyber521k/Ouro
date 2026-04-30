@@ -19,7 +19,7 @@ log = logging.getLogger("ouro.chat")
 
 try:
     from fastapi import APIRouter, HTTPException, Request
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
 except ImportError:  # pragma: no cover
     raise
 
@@ -283,56 +283,98 @@ async def _chat_stream_generator(
         request_data.max_tokens, request_data.temperature, request_data.top_p,
     )
 
-    # Stream tokens to the client while transparently stripping <think>…</think>.
+    # ---------------------------------------------------------------------------
+    # Streaming state machine with tool-call detection
     #
-    # State machine:
-    #   "waiting"  — first tokens arriving; we don't know yet if there's a think block
-    #   "thinking" — inside a <think> block; buffer silently, don't stream
-    #   "streaming" — past any think block; stream every token immediately
+    # The challenge: Qwen3/Hermes models emit tool calls as XML text
+    # (e.g. <tool_call><function=name>...</function></tool_call>), which must be
+    # intercepted and converted to proper OpenAI tool_calls format.  If we stream
+    # the raw XML as content, Hermes Agent sees garbage text followed by tool_calls
+    # and gets confused (empty response error).
     #
-    # We use a small look-ahead buffer (≤ len("<think>") tokens) during "waiting"
-    # so we can decide which state to enter without losing early tokens.
+    # Solution: buffer ALL output.  Once generation finishes:
+    #   - If tool calls are detected → emit them in proper incremental format
+    #   - If no tool calls → emit the buffered text as content
+    #
+    # For latency on non-tool responses: we use a hybrid approach.  We buffer
+    # tokens until we can determine whether the output is a tool call.  If the
+    # first meaningful tokens indicate a tool call (<tool_call>, or starts with
+    # { after think stripping), we buffer everything.  Otherwise we flush and
+    # stream normally.
+    #
+    # States:
+    #   "waiting"     — accumulating initial tokens to decide what kind of output
+    #   "thinking"    — inside a <think> block; buffer silently
+    #   "buffering"   — detected likely tool call; buffer everything silently
+    #   "streaming"   — confirmed non-tool output; stream tokens directly
+    # ---------------------------------------------------------------------------
     full_text = ""
-    state = "waiting"   # "waiting" | "thinking" | "streaming"
-    buffer = ""         # accumulates tokens in waiting/thinking states
+    state = "waiting"
+    buffer = ""
 
     THINK_OPEN = "<think>"
     THINK_CLOSE = "</think>"
+    TOOL_CALL_OPEN = "<tool_call>"
+
+    # How many characters to buffer before deciding (accounts for <think> + <tool_call>)
+    DECISION_THRESHOLD = 20
 
     try:
         for token in token_stream:
             full_text += token
 
             if state == "streaming":
-                # Fast path — past any thinking block, stream directly
+                # Fast path — confirmed non-tool output, stream directly
                 yield _sse(ChatCompletionChunk(
                     id=completion_id, object="chat.completion.chunk",
                     created=created, model=model_id,
                     choices=[StreamChoice(index=0, delta=Delta(content=token), finish_reason=None)],
                 ).model_dump_json(exclude_none=True))
 
+            elif state == "buffering":
+                # Silently accumulate — will be emitted as tool_calls at the end
+                buffer += token
+
             elif state == "thinking":
                 buffer += token
                 if THINK_CLOSE in buffer:
-                    # Exited thinking block — switch to streaming
-                    state = "streaming"
+                    # Exited thinking block — check what comes after
                     after = buffer.split(THINK_CLOSE, 1)[1].lstrip("\n")
-                    buffer = ""
-                    if after:
-                        yield _sse(ChatCompletionChunk(
-                            id=completion_id, object="chat.completion.chunk",
-                            created=created, model=model_id,
-                            choices=[StreamChoice(index=0, delta=Delta(content=after), finish_reason=None)],
-                        ).model_dump_json(exclude_none=True))
+                    buffer = after
+                    # Now decide: is the post-think content a tool call?
+                    if buffer.lstrip().startswith(TOOL_CALL_OPEN):
+                        state = "buffering"
+                    elif len(buffer) >= DECISION_THRESHOLD:
+                        # Enough to decide — check for tool call indicators
+                        stripped = buffer.lstrip()
+                        if stripped.startswith(TOOL_CALL_OPEN) or stripped.startswith("{"):
+                            state = "buffering"
+                        else:
+                            state = "streaming"
+                            if buffer:
+                                yield _sse(ChatCompletionChunk(
+                                    id=completion_id, object="chat.completion.chunk",
+                                    created=created, model=model_id,
+                                    choices=[StreamChoice(index=0, delta=Delta(content=buffer), finish_reason=None)],
+                                ).model_dump_json(exclude_none=True))
+                                buffer = ""
+                    # else: keep buffering in thinking-exit state (will be caught below)
 
             else:  # state == "waiting"
                 buffer += token
-                if buffer.lstrip().startswith(THINK_OPEN):
-                    # Confirmed thinking block — switch to thinking state
+                stripped = buffer.lstrip()
+
+                if stripped.startswith(THINK_OPEN):
+                    # Confirmed thinking block
                     state = "thinking"
-                elif len(buffer) >= len(THINK_OPEN) and THINK_OPEN not in buffer:
-                    # Enough tokens buffered and no <think> — no thinking block
-                    # Flush buffer and switch to streaming
+                elif stripped.startswith(TOOL_CALL_OPEN):
+                    # Tool call detected immediately — buffer everything
+                    state = "buffering"
+                elif stripped.startswith("{"):
+                    # Possible bare JSON tool call — buffer to confirm
+                    state = "buffering"
+                elif len(buffer) >= DECISION_THRESHOLD:
+                    # Enough tokens, no tool call indicators — stream normally
                     state = "streaming"
                     yield _sse(ChatCompletionChunk(
                         id=completion_id, object="chat.completion.chunk",
@@ -340,41 +382,77 @@ async def _chat_stream_generator(
                         choices=[StreamChoice(index=0, delta=Delta(content=buffer), finish_reason=None)],
                     ).model_dump_json(exclude_none=True))
                     buffer = ""
-                # else: still accumulating the look-ahead buffer — keep waiting
+                # else: keep waiting for more tokens
 
     except Exception as exc:
         yield _sse(json.dumps({"error": {"message": str(exc), "type": "server_error"}}))
         yield "data: [DONE]\n\n"
         return
 
-    # If we never left the thinking/waiting state (e.g. model only output <think>…</think>
-    # with no content after, or max_tokens hit mid-think), strip and send the whole text.
-    if state != "streaming" or buffer:
-        clean_text = _strip_thinking(full_text)
-        if clean_text:
-            yield _sse(ChatCompletionChunk(
-                id=completion_id, object="chat.completion.chunk",
-                created=created, model=model_id,
-                choices=[StreamChoice(index=0, delta=Delta(content=clean_text), finish_reason=None)],
-            ).model_dump_json(exclude_none=True))
+    # ---------------------------------------------------------------------------
+    # Generation complete — decide how to emit the response
+    # ---------------------------------------------------------------------------
 
-    # Check for tool calls in the full response
+    # Strip thinking from the full accumulated text
     clean_full = _strip_thinking(full_text)
+
+    # Check for tool calls
     raw_tool_calls = _parse_tool_calls(clean_full)
 
     if raw_tool_calls:
-        delta_tool_calls = [_raw_to_delta_tool_call(tc, i) for i, tc in enumerate(raw_tool_calls)]
+        # Emit tool calls in proper OpenAI streaming format:
+        # 1. One chunk per tool call with id, type, function.name, and full arguments
+        # 2. Final chunk with finish_reason="tool_calls"
+        #
+        # Note: we emit each tool call's arguments in full (not character-by-character)
+        # because Hermes Agent accumulates them anyway and partial arguments can cause
+        # JSON parse errors on the client side.
+        for i, tc in enumerate(raw_tool_calls):
+            delta_tc = _raw_to_delta_tool_call(tc, i)
+            yield _sse(ChatCompletionChunk(
+                id=completion_id, object="chat.completion.chunk",
+                created=created, model=model_id,
+                choices=[StreamChoice(
+                    index=0,
+                    delta=Delta(tool_calls=[delta_tc]),
+                    finish_reason=None,
+                )],
+            ).model_dump_json(exclude_none=True))
+
+        # Final chunk: empty delta + finish_reason
         yield _sse(ChatCompletionChunk(
-            id=completion_id, object="chat.completion.chunk", created=created, model=model_id,
-            choices=[StreamChoice(
-                index=0,
-                delta=Delta(role="assistant", content=None, tool_calls=delta_tool_calls),
-                finish_reason="tool_calls",
-            )],
+            id=completion_id, object="chat.completion.chunk",
+            created=created, model=model_id,
+            choices=[StreamChoice(index=0, delta=Delta(), finish_reason="tool_calls")],
         ).model_dump_json(exclude_none=True))
+
     else:
+        # No tool calls — emit any remaining buffered text as content
+        if state != "streaming" and buffer:
+            # We were still buffering (e.g. short response that looked like it might
+            # be a tool call but wasn't, or thinking-only response)
+            clean_text = _strip_thinking(buffer) if state == "thinking" else buffer
+            if clean_text:
+                yield _sse(ChatCompletionChunk(
+                    id=completion_id, object="chat.completion.chunk",
+                    created=created, model=model_id,
+                    choices=[StreamChoice(index=0, delta=Delta(content=clean_text), finish_reason=None)],
+                ).model_dump_json(exclude_none=True))
+        elif state == "buffering":
+            # Was buffering because it looked like a tool call but parsing found nothing
+            # (e.g. model emitted { but it wasn't valid JSON tool call)
+            clean_text = _strip_thinking(full_text)
+            if clean_text:
+                yield _sse(ChatCompletionChunk(
+                    id=completion_id, object="chat.completion.chunk",
+                    created=created, model=model_id,
+                    choices=[StreamChoice(index=0, delta=Delta(content=clean_text), finish_reason=None)],
+                ).model_dump_json(exclude_none=True))
+
+        # Finish with stop
         yield _sse(ChatCompletionChunk(
-            id=completion_id, object="chat.completion.chunk", created=created, model=model_id,
+            id=completion_id, object="chat.completion.chunk",
+            created=created, model=model_id,
             choices=[StreamChoice(index=0, delta=Delta(), finish_reason="stop")],
         ).model_dump_json(exclude_none=True))
 
@@ -398,7 +476,10 @@ async def chat_completions(request_data: ChatCompletionRequest, request: Request
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                      "Connection": "keep-alive"},
         )
-    return _chat_non_stream(request_data, model, tokenizer, model_id, prompt)
+    response = _chat_non_stream(request_data, model, tokenizer, model_id, prompt)
+    # Return JSON with null fields excluded — Hermes Agent and other OpenAI clients
+    # expect clean responses without null tool_calls/name/tool_call_id fields.
+    return JSONResponse(content=json.loads(response.model_dump_json(exclude_none=True)))
 
 
 @router.post("/v1/completions")

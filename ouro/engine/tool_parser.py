@@ -146,6 +146,82 @@ def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Hermes/Qwen3 XML parameter format
+# ---------------------------------------------------------------------------
+
+# Matches: <tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>\n...</function>\n</tool_call>
+_RE_HERMES_TOOL_CALL = re.compile(
+    r"<tool_call>\s*<function=([^>]+)>(.*?)</function>\s*</tool_call>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Also match unclosed variant (no </tool_call>)
+_RE_HERMES_TOOL_CALL_UNCLOSED = re.compile(
+    r"<tool_call>\s*<function=([^>]+)>(.*?)(?:</function>|$)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Extract individual parameters: <parameter=KEY>\nVALUE\n</parameter>
+_RE_HERMES_PARAM = re.compile(
+    r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _parse_hermes_xml_tool_calls(text: str) -> List[Dict[str, Any]]:
+    """
+    Parse Hermes/Qwen3-style XML tool calls.
+
+    Format:
+        <tool_call>
+        <function=function_name>
+        <parameter=param1>
+        value1
+        </parameter>
+        <parameter=param2>
+        value2
+        </parameter>
+        </function>
+        </tool_call>
+    """
+    results: List[Dict[str, Any]] = []
+
+    # Try properly closed first
+    matches = list(_RE_HERMES_TOOL_CALL.finditer(text))
+    if not matches:
+        matches = list(_RE_HERMES_TOOL_CALL_UNCLOSED.finditer(text))
+
+    for match in matches:
+        func_name = match.group(1).strip()
+        body = match.group(2)
+
+        # Extract parameters
+        arguments: Dict[str, Any] = {}
+        for param_match in _RE_HERMES_PARAM.finditer(body):
+            param_name = param_match.group(1).strip()
+            param_value = param_match.group(2).strip()
+
+            # Try to parse value as JSON (for objects, arrays, numbers, booleans)
+            try:
+                parsed = json.loads(param_value)
+                arguments[param_name] = parsed
+            except (json.JSONDecodeError, ValueError):
+                arguments[param_name] = param_value
+
+        call = {
+            "id": _make_id(),
+            "type": "function",
+            "function": {
+                "name": func_name,
+                "arguments": json.dumps(arguments),
+            },
+        }
+        results.append(call)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Main extraction strategies
 # ---------------------------------------------------------------------------
 
@@ -153,12 +229,21 @@ def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
 def _extract_xml_tool_calls(text: str) -> List[Dict[str, Any]]:
     """Extract tool calls from <tool_call>…</tool_call> tags.
 
+    Supports two formats:
+      - JSON inside tags: <tool_call>{"name": ..., "arguments": ...}</tool_call>
+      - Hermes/Qwen3 XML parameters: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+
     Falls back to unclosed-tag pattern for models that emit
     ``<tool_call>{...}`` without a closing tag.
     """
     results: List[Dict[str, Any]] = []
 
-    # Primary: properly closed tags
+    # Try Hermes/Qwen3 XML parameter format first (more specific pattern)
+    results = _parse_hermes_xml_tool_calls(text)
+    if results:
+        return results
+
+    # JSON inside XML tags: <tool_call>{...}</tool_call>
     for match in _RE_XML_TOOL_CALL.finditer(text):
         raw = _try_parse_json(match.group(1))
         if raw is None:
