@@ -202,10 +202,18 @@ async def _chat_stream_generator(
         yield "data: [DONE]\n\n"
         return
 
-    # Determine finish reason after full text is buffered
-    tool_calls = _parse_tool_calls(_strip_thinking(full_text))
+    # Determine finish reason after full text is buffered.
+    # Strip thinking block before parsing tool calls.
+    clean_text = _strip_thinking(full_text)
+    tool_calls = _parse_tool_calls(clean_text)
+
     if tool_calls:
-        # Emit a final chunk carrying tool_call info in the delta
+        # When tool calls are detected we:
+        # 1. Suppress the raw streamed content (already sent as tokens above —
+        #    we need to tell the client to discard it and use the tool_calls
+        #    instead).  We do this by sending a final chunk with finish_reason
+        #    "tool_calls" and the parsed calls in the delta.
+        # 2. Send finish chunk BEFORE [DONE] so the client processes it.
         tool_chunk = ChatCompletionChunk(
             id=completion_id,
             object="chat.completion.chunk",
@@ -214,7 +222,7 @@ async def _chat_stream_generator(
             choices=[
                 StreamChoice(
                     index=0,
-                    delta=Delta(content=None, tool_calls=tool_calls),
+                    delta=Delta(role="assistant", content=None, tool_calls=tool_calls),
                     finish_reason="tool_calls",
                 )
             ],

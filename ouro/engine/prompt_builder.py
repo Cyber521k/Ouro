@@ -90,24 +90,41 @@ def build_prompt(
 
     if apply_fn is not None and chat_template_attr is not None:
         try:
+            # Convert Pydantic objects → clean dicts, dropping None fields so
+            # the Jinja template doesn't choke on unexpected null keys.
+            def _to_dict(msg: Any) -> Dict[str, Any]:
+                if isinstance(msg, dict):
+                    return {k: v for k, v in msg.items() if v is not None}
+                # Pydantic v2
+                if hasattr(msg, "model_dump"):
+                    return {k: v for k, v in msg.model_dump().items() if v is not None}
+                # Pydantic v1
+                if hasattr(msg, "dict"):
+                    return {k: v for k, v in msg.dict().items() if v is not None}
+                return dict(msg)
+
+            clean_messages = [_to_dict(m) for m in messages]
+
             kwargs: Dict[str, Any] = {
                 "tokenize": False,
                 "add_generation_prompt": True,
             }
             if tools is not None:
                 kwargs["tools"] = tools
+                # Disable thinking when tools are present — Qwen3 thinking +
+                # tool-calling conflict; the model stops mid-generation.
+                kwargs["enable_thinking"] = False
+            else:
+                # Qwen3 and similar thinking models: enable_thinking so the
+                # template wraps reasoning in <think>…</think> (stripped in
+                # the API layer).  Silently ignored by non-thinking models.
+                try:
+                    apply_fn(clean_messages, **{**kwargs, "enable_thinking": True})
+                    kwargs["enable_thinking"] = True
+                except Exception:
+                    pass  # model doesn't support enable_thinking — skip it
 
-            # Qwen3 and similar thinking models: pass enable_thinking=True so
-            # the template wraps the reasoning phase in <think>…</think> tags
-            # (which we strip in the API layer).  For models that don't support
-            # this kwarg the template will silently ignore it.
-            try:
-                apply_fn(messages, **{**kwargs, "enable_thinking": True})
-                kwargs["enable_thinking"] = True
-            except Exception:
-                pass  # model doesn't support enable_thinking — skip it
-
-            prompt: str = apply_fn(messages, **kwargs)
+            prompt: str = apply_fn(clean_messages, **kwargs)
             return prompt
         except Exception as exc:
             log.warning(
@@ -129,5 +146,17 @@ def build_prompt(
             "Tool definitions are not supported by the fallback Llama-3 template "
             "and will be ignored."
         )
+
+    # Ensure messages are plain dicts for the fallback template too
+    if not all(isinstance(m, dict) for m in messages):
+        def _to_plain(msg: Any) -> Dict[str, Any]:
+            if isinstance(msg, dict):
+                return msg
+            if hasattr(msg, "model_dump"):
+                return {k: v for k, v in msg.model_dump().items() if v is not None}
+            if hasattr(msg, "dict"):
+                return {k: v for k, v in msg.dict().items() if v is not None}
+            return dict(msg)
+        messages = [_to_plain(m) for m in messages]
 
     return _render_llama3_template(messages)
