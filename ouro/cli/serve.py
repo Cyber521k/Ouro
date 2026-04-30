@@ -2,7 +2,7 @@
 ouro/cli/serve.py — Start / stop an OpenAI-compatible HTTP server for a model.
 
 Usage:
-    ouro serve <model> [--host 127.0.0.1] [--port 8000]
+    ouro serve <model> [--host 127.0.0.1] [--port 5215]
     ouro stop  <model>
 """
 
@@ -25,7 +25,7 @@ OURO_PIDS_DIR = Path.home() / ".ouro" / "pids"
 
 # Default server settings
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8000
+DEFAULT_PORT = 5215
 
 
 def _safe_model_name(model: str) -> str:
