@@ -310,18 +310,6 @@ def show_welcome() -> None:
         )
         console.print(no_models_panel)
     else:
-        table = Table(
-            show_header=True,
-            header_style=amber,
-            border_style=brown_border,
-            show_lines=False,
-            expand=True,
-            row_styles=["", "dim"],
-        )
-        table.add_column("Model Name", style="cyan", no_wrap=False, ratio=4)
-        table.add_column("Size (GB)", justify="right", style="green", ratio=1)
-        table.add_column("Modified", style="magenta", ratio=2)
-
         for model in models:
             name = str(model.get("id", ""))
             size_mb = model.get("size_mb", 0)
@@ -332,9 +320,12 @@ def show_welcome() -> None:
             else:
                 size_str = "—"
 
-            table.add_row(name, size_str, modified)
-
-        console.print(table)
+            line = Text()
+            line.append("  ● ", style="bold yellow")
+            line.append(f"{name}", style="cyan")
+            line.append(f"    {size_str}", style="green")
+            line.append(f"    {modified}", style="dim magenta")
+            console.print(line)
 
     console.print()
 
