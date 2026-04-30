@@ -97,6 +97,38 @@ def _get_ouro_title() -> str:
     return OURO_FALLBACK_TITLE
 
 
+def _estimate_size_from_name(model_id: str) -> float:
+    """Estimate model size in GB from its name using param count + quantization bits."""
+    import re
+    name = model_id.lower()
+
+    # extract parameter count (e.g. 7b, 13b, 70b, 0.5b, 1.7b, 3b, 30b)
+    param_match = re.search(r'(\d+\.?\d*)\s*b(?:[^a-z]|$)', name)
+    params_b = float(param_match.group(1)) if param_match else 7.0  # default 7B
+
+    # extract bits from quant suffix
+    if 'bf16' in name or 'fp16' in name:
+        bits = 16
+    elif 'fp32' in name:
+        bits = 32
+    elif 'mxfp4' in name or 'nvfp4' in name or '4bit' in name or 'q4' in name or 'dq4' in name or '4-bit' in name:
+        bits = 4
+    elif '8bit' in name or 'q8' in name or '8-bit' in name or 'mxfp8' in name:
+        bits = 8
+    elif '6bit' in name or 'q6' in name:
+        bits = 6
+    elif '3bit' in name or 'q3' in name or 'dq3' in name:
+        bits = 3
+    elif '2bit' in name or 'q2' in name or 'dq2' in name:
+        bits = 2
+    else:
+        bits = 4  # most mlx-community models are 4bit
+
+    # bytes per param + ~10% overhead
+    size_gb = round((params_b * 1e9 * bits / 8) / (1024 ** 3) * 1.1, 2)
+    return max(size_gb, 0.1)
+
+
 def _hf_cache_path() -> "Path":
     """Return the path to the local HuggingFace model cache file."""
     from pathlib import Path
@@ -132,15 +164,8 @@ def _fetch_hf_models() -> List[Dict[str, Any]]:
 
         for m in data:
             model_id = m.get("id", "")
-            # estimate size from safetensors metadata if available
-            size_gb = 0.0
-            siblings = m.get("siblings", [])
-            total_bytes = sum(
-                s.get("size", 0) for s in siblings
-                if s.get("rfilename", "").endswith((".safetensors", ".gguf", ".bin"))
-            )
-            if total_bytes:
-                size_gb = round(total_bytes / (1024 ** 3), 2)
+            # estimate size from model name (e.g. 7B-4bit -> ~4GB, 27B-4bit -> ~14GB)
+            size_gb = _estimate_size_from_name(model_id)
 
             results.append({
                 "id": model_id.replace("mlx-community/", ""),
