@@ -93,7 +93,7 @@ def serve_command(
         raise typer.Exit(code=1)
 
     try:
-        from ouro.api.app import create_app  # type: ignore[import]
+        from ouro.api.server import create_app  # type: ignore[import]
     except ImportError as exc:
         console.print(f"[red]Error importing API app:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -115,7 +115,7 @@ def serve_command(
 
     # Build FastAPI app
     try:
-        fastapi_app = create_app(loaded_model, tokenizer, model_name=model)
+        fastapi_app = create_app(loaded_model, tokenizer, model_id=model)
     except Exception as exc:
         console.print(f"[red]Failed to create API app:[/red] {exc}")
         raise typer.Exit(code=1)

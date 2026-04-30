@@ -67,7 +67,6 @@ def pull_command(
                 repo_id=repo_id,
                 revision=revision,
                 local_dir=str(cache_path),
-                local_dir_use_symlinks=False,
             )
         except Exception as exc:  # pragma: no cover
             console.print(f"[red]Download failed:[/red] {exc}")

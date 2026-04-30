@@ -39,7 +39,7 @@ def list_command() -> None:
     table.add_column("Modified", style="magenta")
 
     for model in models:
-        name = model.get("name", "")
+        name = model.get("id", "")
         path = model.get("path", "")
         size_mb = model.get("size_mb", "")
         modified = model.get("modified", "")
