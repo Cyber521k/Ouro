@@ -312,6 +312,71 @@ def _get_installed_models() -> List[Dict[str, Any]]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Server status helpers
+# ---------------------------------------------------------------------------
+
+def _get_server_status() -> Dict[str, Any]:
+    """
+    Probe the running Ouro server and return a status dict:
+
+        {
+            "running": bool,
+            "endpoint": str,          # e.g. "http://127.0.0.1:5215/v1"
+            "models": [...],          # list of model id strings from /v1/models
+            "is_service": bool,       # True if launchd plist is installed
+            "pid": int | None,
+        }
+    """
+    import urllib.request
+    import json as _json
+    from ouro.config import get_config
+
+    cfg = get_config()
+    host = cfg.api_host
+    port = cfg.api_port
+    endpoint = f"http://{host}:{port}/v1"
+
+    result: Dict[str, Any] = {
+        "running": False,
+        "endpoint": endpoint,
+        "models": [],
+        "is_service": False,
+        "pid": None,
+    }
+
+    # Check if launchd service plist is installed
+    from pathlib import Path
+    plist = Path.home() / "Library" / "LaunchAgents" / "com.ouro.server.plist"
+    result["is_service"] = plist.exists()
+
+    # Try to hit the server
+    try:
+        req = urllib.request.Request(
+            f"{endpoint}/models",
+            headers={"User-Agent": "ouro-cli/welcome"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = _json.loads(resp.read().decode())
+        result["running"] = True
+        result["models"] = [m.get("id", "") for m in data.get("data", [])]
+    except Exception:
+        result["running"] = False
+
+    # Try to get PID from the pid file ouro writes on serve
+    pid_file = Path.home() / ".ouro" / "ouro.pid"
+    try:
+        pid = int(pid_file.read_text().strip())
+        # Verify process is actually alive
+        import os as _os
+        _os.kill(pid, 0)
+        result["pid"] = pid
+    except Exception:
+        result["pid"] = None
+
+    return result
+
+
 def _get_version() -> str:
     """Return the Ouro package version."""
     try:
@@ -543,7 +608,68 @@ def show_welcome() -> None:
     console.print()
 
     # -----------------------------------------------------------------------
-    # 4. Recommended models (HuggingFace mlx-community, fast on this machine)
+    # 4. Server status panel
+    # -----------------------------------------------------------------------
+    srv = _get_server_status()
+
+    status_body = Text(justify="left")
+
+    if srv["running"]:
+        status_body.append("  ● ", style="bold green")
+        status_body.append("RUNNING", style="bold green")
+        if srv["pid"]:
+            status_body.append(f"   PID {srv['pid']}", style="dim")
+        if srv["is_service"]:
+            status_body.append("   (launchd service — starts on login)", style="dim")
+        status_body.append("\n\n")
+
+        status_body.append("  Endpoint  ", style="dim")
+        status_body.append(f"{srv['endpoint']}\n", style="bold cyan")
+
+        if srv["models"]:
+            status_body.append("  Models    ", style="dim")
+            status_body.append(f"{len(srv['models'])} loaded\n", style="bold yellow")
+            status_body.append("\n")
+            for mid in srv["models"]:
+                status_body.append("    ◈ ", style="bold yellow")
+                status_body.append(f"{mid}\n", style="cyan")
+        else:
+            status_body.append("  Models    ", style="dim")
+            status_body.append("none loaded (server just started?)\n", style="dim yellow")
+
+        srv_border = "green"
+        srv_title = "[bold green]◈ Server Status[/bold green]"
+    else:
+        status_body.append("  ○ ", style="bold red")
+        status_body.append("NOT RUNNING", style="bold red")
+        status_body.append("\n\n")
+
+        if srv["is_service"]:
+            status_body.append("  launchd service is installed but server is not responding.\n", style="yellow")
+            status_body.append("  Check logs: ", style="dim")
+            status_body.append("~/.ouro/logs/ouro.err.log\n", style="cyan")
+        else:
+            status_body.append("  Start the server:\n", style="dim")
+            status_body.append("    ouro serve               ", style="cyan")
+            status_body.append("run in foreground\n", style="dim")
+            status_body.append("    ouro service install     ", style="cyan")
+            status_body.append("auto-start on login (recommended)\n", style="dim")
+
+        srv_border = "red"
+        srv_title = "[bold red]◈ Server Status[/bold red]"
+
+    srv_panel = Panel(
+        status_body,
+        title=srv_title,
+        border_style=srv_border,
+        padding=(0, 2),
+        expand=True,
+    )
+    console.print(srv_panel)
+    console.print()
+
+    # -----------------------------------------------------------------------
+    # 5. Recommended models (HuggingFace mlx-community, fast on this machine)
     # -----------------------------------------------------------------------
     try:
         import psutil
@@ -581,7 +707,7 @@ def show_welcome() -> None:
     console.print()
 
     # -----------------------------------------------------------------------
-    # 5. Installed models table
+    # 6. Installed models table
     # -----------------------------------------------------------------------
     console.print(Rule(
         title="[bold yellow]◈ Installed Models[/bold yellow]",
@@ -632,7 +758,7 @@ def show_welcome() -> None:
     console.print()
 
     # -----------------------------------------------------------------------
-    # 5. Footer
+    # 7. Footer
     # -----------------------------------------------------------------------
     n = len(models)
     model_word = "model" if n == 1 else "models"
