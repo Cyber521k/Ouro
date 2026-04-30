@@ -84,12 +84,12 @@ def serve_command(
 
     if not cfg.models:
         console.print(
-            "[yellow]Warning:[/yellow] No models in [cyan]~/.ouro/config.yaml[/cyan].\n"
-            "Add a [bold]models[/bold] list, e.g.:\n\n"
-            "  [dim]models:[/dim]\n"
-            "  [dim]  - mlx-community/Qwen3-8B-4bit[/dim]\n"
+            "[yellow]Warning:[/yellow] No models in [cyan]~/.ouro/config.yaml[/cyan].\\n"
+            "Add a [bold]models[/bold] list, e.g.:\\n\\n"
+            "  [dim]models:[/dim]\\n"
+            "  [dim]  - mlx-community/Qwen3-8B-4bit[/dim]\\n"
+            "\\nStarting server anyway — add models to config and restart to serve them.\\n"
         )
-        raise typer.Exit(code=1)
 
     console.print(f"[bold green]Ouro[/bold green] starting on [cyan]http://{host}:{port}/v1[/cyan]")
     console.print(f"Loading [bold]{len(cfg.models)}[/bold] model(s):")
