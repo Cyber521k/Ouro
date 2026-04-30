@@ -165,9 +165,8 @@ def _fetch_hf_models() -> List[Dict[str, Any]]:
 
         for m in data:
             model_id = m.get("id", "")
-            # Skip non-MLX repos: require the "mlx" tag to be present
-            tags = m.get("tags", [])
-            if not any(t.lower() == "mlx" or t.lower().startswith("mlx-") for t in tags):
+            # Skip non-MLX repos: require "mlx" to appear in the model name itself
+            if "mlx" not in model_id.lower():
                 continue
             # estimate size from model name (e.g. 7B-4bit -> ~4GB, 27B-4bit -> ~14GB)
             size_gb = _estimate_size_from_name(model_id)
