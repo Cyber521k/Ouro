@@ -13,7 +13,9 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
+from rich.text import Text
 
 console = Console()
 
@@ -38,8 +40,12 @@ def run_command(
     model: str = typer.Argument(..., help="Model name or path to run"),
     prompt: Optional[str] = typer.Argument(None, help="One-shot prompt; omit for interactive REPL"),
     system: Optional[str] = typer.Option(None, "--system", help="System prompt"),
-    temperature: float = typer.Option(0.7, "--temperature", help="Sampling temperature"),
-    max_tokens: int = typer.Option(512, "--max-tokens", help="Maximum tokens to generate"),
+    temperature: float = typer.Option(0.6, "--temperature", help="Sampling temperature"),
+    max_tokens: int = typer.Option(8192, "--max-tokens", help="Maximum tokens to generate"),
+    top_p: float = typer.Option(0.95, "--top-p", help="Nucleus sampling probability"),
+    min_p: float = typer.Option(0.0, "--min-p", help="Min-p sampling (0.0 = disabled)"),
+    repetition_penalty: float = typer.Option(1.0, "--rep-penalty", help="Repetition penalty (1.0 = off)"),
+    no_thinking: bool = typer.Option(False, "--no-thinking", help="For Qwen3: disable <think> reasoning phase"),
 ) -> None:
     """
     [bold]Run[/bold] a model interactively or in one-shot mode.
@@ -84,7 +90,47 @@ def run_command(
     gen_params: dict = {
         "temperature": temperature,
         "max_tokens": max_tokens,
+        "top_p": top_p,
     }
+    if min_p > 0.0:
+        gen_params["min_p"] = min_p
+    if repetition_penalty != 1.0:
+        gen_params["repetition_penalty"] = repetition_penalty
+
+    def _inject_thinking(msgs: list) -> list:
+        """For Qwen3 thinking models: append /no_think to the last user message to skip reasoning."""
+        if not no_thinking:
+            return msgs
+        result = list(msgs)
+        for i in range(len(result) - 1, -1, -1):
+            if result[i].get("role") == "user":
+                result[i] = dict(result[i])
+                content = result[i].get("content", "")
+                if not content.endswith("/no_think"):
+                    result[i]["content"] = content + " /no_think"
+                break
+        return result
+
+    def _stream_response(msgs: list) -> str:
+        """Build prompt, stream tokens to stdout, return full response text."""
+        built_prompt = prompt_builder.build_prompt(tokenizer, _inject_thinking(msgs))
+        token_stream = engine_generate.generate_stream(loaded_model, tokenizer, built_prompt, **gen_params)
+        full_text = ""
+        in_think = False
+        console.print("[bold cyan]Assistant:[/bold cyan] ", end="")
+        for token in token_stream:
+            full_text += token
+            # Dim the <think>...</think> block so it's visually distinct but still visible
+            if "<think>" in token:
+                in_think = True
+            if in_think:
+                console.print(f"[dim]{token}[/dim]", end="")
+            else:
+                console.print(token, end="")
+            if "</think>" in token:
+                in_think = False
+        console.print()  # newline after last token
+        return full_text
 
     # ------------------------------------------------------------------
     # One-shot mode
@@ -96,15 +142,10 @@ def run_command(
         messages.append({"role": "user", "content": prompt})
 
         try:
-            built_prompt = prompt_builder.build_prompt(tokenizer, messages)
-            response = engine_generate.generate(loaded_model, tokenizer, built_prompt, **gen_params)
+            _stream_response(messages)
         except Exception as exc:
             console.print(f"[red]Generation error:[/red] {exc}")
             raise typer.Exit(code=1)
-
-        sys.stdout.write(response)
-        if not response.endswith("\n"):
-            sys.stdout.write("\n")
         return
 
     # ------------------------------------------------------------------
@@ -156,13 +197,11 @@ def run_command(
         messages.append({"role": "user", "content": stripped})
 
         try:
-            built_prompt = prompt_builder.build_prompt(tokenizer, messages)
-            response = engine_generate.generate(loaded_model, tokenizer, built_prompt, **gen_params)
+            response = _stream_response(messages)
         except Exception as exc:
             console.print(f"[red]Generation error:[/red] {exc}")
             # Remove last user message so conversation stays consistent
             messages.pop()
             continue
 
-        console.print(Markdown(response))
         messages.append({"role": "assistant", "content": response})

@@ -29,9 +29,11 @@ def generate(
     model: Any,
     tokenizer: Any,
     prompt: str,
-    max_tokens: int = 512,
-    temperature: float = 0.7,
-    top_p: float = 0.9,
+    max_tokens: int = 4096,
+    temperature: float = 0.6,
+    top_p: float = 0.95,
+    min_p: float = 0.0,
+    repetition_penalty: float = 1.0,
 ) -> str:
     """
     Generate a completion for *prompt* and return the full response as a string.
@@ -78,6 +80,12 @@ def generate(
     # The exact kwarg names may differ between releases; we try the most
     # common interface first and fall back gracefully.
     try:
+        extra: dict[str, Any] = {}
+        if min_p > 0.0:
+            extra["min_p"] = min_p
+        if repetition_penalty != 1.0:
+            extra["repetition_penalty"] = repetition_penalty
+
         response: str = mlx_lm.generate(
             model,
             tokenizer,
@@ -86,6 +94,7 @@ def generate(
             temp=temperature,
             top_p=top_p,
             verbose=False,
+            **extra,
         )
     except TypeError:
         # Older / newer API that doesn't accept verbose= or uses different names
@@ -103,9 +112,11 @@ def generate_stream(
     model: Any,
     tokenizer: Any,
     prompt: str,
-    max_tokens: int = 512,
-    temperature: float = 0.7,
-    top_p: float = 0.9,
+    max_tokens: int = 4096,
+    temperature: float = 0.6,
+    top_p: float = 0.95,
+    min_p: float = 0.0,
+    repetition_penalty: float = 1.0,
     **kwargs: Any,
 ) -> Iterator[str]:
     """
@@ -150,6 +161,12 @@ def generate_stream(
     # Fall back to mlx_lm.generate_step if stream_generate is unavailable.
     stream_fn = getattr(mlx_lm, "stream_generate", None)
     if stream_fn is not None:
+        extra: dict[str, Any] = {}
+        if min_p > 0.0:
+            extra["min_p"] = min_p
+        if repetition_penalty != 1.0:
+            extra["repetition_penalty"] = repetition_penalty
+
         for token_response in stream_fn(
             model,
             tokenizer,
@@ -157,6 +174,7 @@ def generate_stream(
             max_tokens=max_tokens,
             temp=temperature,
             top_p=top_p,
+            **extra,
             **kwargs,
         ):
             # stream_generate yields objects with a .text attribute
