@@ -142,7 +142,8 @@ def _fetch_hf_models() -> List[Dict[str, Any]]:
     import urllib.request
     import json
 
-    results = []
+    results: Dict[str, Any] = {}  # keyed by full model_id to deduplicate
+    seen_ids: set = set()
     page = 1
     per_page = 100
 
@@ -164,23 +165,21 @@ def _fetch_hf_models() -> List[Dict[str, Any]]:
 
         for m in data:
             model_id = m.get("id", "")
-            # Skip non-MLX repos (GGUF, safetensors-only, datasets, etc.)
+            # Skip non-MLX repos: require the "mlx" tag to be present
             tags = m.get("tags", [])
-            if "mlx" not in tags and not any("mlx" in t.lower() for t in tags):
-                # Fall back to name check — mlx-community repos nearly always have mlx tag
-                # but if the tag list is empty we allow it (tag may not be indexed yet)
-                if tags:  # non-empty tag list with no mlx tag → skip
-                    continue
+            if not any(t.lower() == "mlx" or t.lower().startswith("mlx-") for t in tags):
+                continue
             # estimate size from model name (e.g. 7B-4bit -> ~4GB, 27B-4bit -> ~14GB)
             size_gb = _estimate_size_from_name(model_id)
 
-            results.append({
+            seen_ids.add(model_id)
+            results[model_id] = {
                 "id": model_id.replace("mlx-community/", ""),
                 "full_id": model_id,
                 "size_gb": size_gb,
                 "downloads": m.get("downloads", 0),
                 "pull_cmd": f"ouro pull {model_id}",
-            })
+            }
 
         if len(data) < per_page:
             break
@@ -188,7 +187,7 @@ def _fetch_hf_models() -> List[Dict[str, Any]]:
         if page > 5:  # cap at 500 models
             break
 
-    return results
+    return list(results.values())
 
 
 def _load_hf_cache() -> List[Dict[str, Any]]:
