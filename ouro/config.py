@@ -45,6 +45,8 @@ class OuroConfig:
     api_port: int = _DEFAULT_PORT
     hub_cache_dir: str = _DEFAULT_HUB_CACHE_DIR
     scan_paths: List[str] = field(default_factory=list)
+    # List of model IDs to load at startup — all served simultaneously
+    models: List[str] = field(default_factory=list)
     # HuggingFace token — enables gated models and higher download rate limits
     hf_token: Optional[str] = None
 
@@ -105,6 +107,7 @@ def load_config(config_path: Optional[Path] = None) -> OuroConfig:
         api_port=int(file_cfg.get("api_port", _DEFAULT_PORT)),
         hub_cache_dir=file_cfg.get("hub_cache_dir", _DEFAULT_HUB_CACHE_DIR),
         scan_paths=list(file_cfg.get("scan_paths", [])),
+        models=list(file_cfg.get("models", [])),
         hf_token=_nested_get(file_cfg, "huggingface", "token"),
     )
 

@@ -31,6 +31,7 @@ from ouro.cli.serve import serve_command, stop_command  # noqa: E402
 from ouro.cli.create import create_command  # noqa: E402
 from ouro.cli.ps import ps_command  # noqa: E402
 from ouro.cli.scan import scan_command  # noqa: E402
+from ouro.cli.service import install_command, uninstall_command, status_command  # noqa: E402
 
 app.command("pull")(pull_command)
 app.command("list")(list_command)
@@ -41,6 +42,17 @@ app.command("stop")(stop_command)
 app.command("create")(create_command)
 app.command("ps")(ps_command)
 app.command("scan")(scan_command)
+
+# Service management (launchd auto-start)
+service_app = typer.Typer(
+    name="service",
+    help="Install/uninstall Ouro as a macOS login service (auto-start on boot).",
+    rich_markup_mode="rich",
+)
+app.add_typer(service_app, name="service")
+service_app.command("install")(install_command)
+service_app.command("uninstall")(uninstall_command)
+service_app.command("status")(status_command)
 
 
 @app.callback()

@@ -1,62 +1,54 @@
 """
-ouro/cli/serve.py — Start / stop an OpenAI-compatible HTTP server for a model.
+ouro/cli/serve.py — Start the Ouro multi-model server.
+
+All models listed in ~/.ouro/config.yaml are loaded at startup and served
+simultaneously on a single port — no model argument needed, just like Ollama.
 
 Usage:
-    ouro serve <model> [--host 127.0.0.1] [--port 5215]
-    ouro stop  <model>
+    ouro serve [--host 127.0.0.1] [--port 5215]
+    ouro stop
 """
-
 from __future__ import annotations
 
 import json
 import os
 import signal
-import sys
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
 
 console = Console()
 
-# Directory where PID files are stored: ~/.ouro/pids/<model_safe_name>.json
-OURO_PIDS_DIR = Path.home() / ".ouro" / "pids"
-
-# Default server settings
+OURO_PID_FILE = Path.home() / ".ouro" / "ouro.pid"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 5215
 
 
-def _safe_model_name(model: str) -> str:
-    """Convert a model ID to a filesystem-safe filename."""
-    return model.replace("/", "_").replace(":", "_")
+# ---------------------------------------------------------------------------
+# PID helpers
+# ---------------------------------------------------------------------------
 
-
-def _pid_file(model: str) -> Path:
-    return OURO_PIDS_DIR / f"{_safe_model_name(model)}.json"
-
-
-def _write_pid_file(model: str, pid: int, host: str, port: int) -> None:
+def _write_pid(pid: int, host: str, port: int) -> None:
     import time
-
-    OURO_PIDS_DIR.mkdir(parents=True, exist_ok=True)
-    data = {
-        "model": model,
-        "pid": pid,
-        "host": host,
-        "port": port,
-        "started": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    _pid_file(model).write_text(json.dumps(data, indent=2))
+    OURO_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    OURO_PID_FILE.write_text(
+        json.dumps({"pid": pid, "host": host, "port": port,
+                    "started": time.strftime("%Y-%m-%d %H:%M:%S")})
+    )
 
 
-def _remove_pid_file(model: str) -> None:
-    pf = _pid_file(model)
+def _read_pid() -> dict | None:
+    if not OURO_PID_FILE.exists():
+        return None
     try:
-        pf.unlink(missing_ok=True)
+        return json.loads(OURO_PID_FILE.read_text())
     except Exception:
-        pass
+        return None
+
+
+def _remove_pid() -> None:
+    OURO_PID_FILE.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -64,109 +56,112 @@ def _remove_pid_file(model: str) -> None:
 # ---------------------------------------------------------------------------
 
 def serve_command(
-    model: str = typer.Argument(..., help="Model name or path to serve"),
     host: str = typer.Option(DEFAULT_HOST, "--host", help="Bind host"),
     port: int = typer.Option(DEFAULT_PORT, "--port", help="Bind port"),
+    background: bool = typer.Option(False, "--background", "-b",
+                                     help="Fork to background (daemonize)"),
 ) -> None:
     """
-    [bold]Serve[/bold] a model as an OpenAI-compatible HTTP API (foreground).
+    [bold]Start[/bold] the Ouro server — all configured models loaded at once.
 
-    The server runs in the foreground.  Press Ctrl-C to stop.
-    A PID file is written to [cyan]~/.ouro/pids/[/cyan] and removed on exit.
+    Add models to serve in [cyan]~/.ouro/config.yaml[/cyan]:
+
+        [dim]models:[/dim]
+          [dim]- mlx-community/Qwen3-8B-4bit[/dim]
+          [dim]- mlx-community/Llama-3.2-3B-Instruct-4bit[/dim]
+
+    The server runs on [cyan]http://{host}:{port}/v1[/cyan] and exposes an
+    OpenAI-compatible REST API.
     """
     try:
-        import uvicorn  # type: ignore[import]
+        import uvicorn  # noqa: F401
     except ImportError:
-        console.print("[red]Error:[/red] uvicorn is not installed. Run: pip install uvicorn")
+        console.print("[red]Error:[/red] uvicorn is not installed.  Run: pip install uvicorn")
         raise typer.Exit(code=1)
 
-    try:
-        from ouro.registry import storage  # type: ignore[import]
-    except ImportError:
-        console.print("[red]Error:[/red] ouro.registry.storage module not found.")
+    from ouro.config import get_config
+    cfg = get_config()
+
+    if not cfg.models:
+        console.print(
+            "[yellow]Warning:[/yellow] No models in [cyan]~/.ouro/config.yaml[/cyan].\n"
+            "Add a [bold]models[/bold] list, e.g.:\n\n"
+            "  [dim]models:[/dim]\n"
+            "  [dim]  - mlx-community/Qwen3-8B-4bit[/dim]\n"
+        )
         raise typer.Exit(code=1)
 
-    try:
-        from ouro.engine import loader as engine_loader  # type: ignore[import]
-    except ImportError as exc:
-        console.print(f"[red]Error importing engine loader:[/red] {exc}")
-        raise typer.Exit(code=1)
-
-    try:
-        from ouro.api.server import create_app  # type: ignore[import]
-    except ImportError as exc:
-        console.print(f"[red]Error importing API app:[/red] {exc}")
-        raise typer.Exit(code=1)
-
-    # Resolve model path
-    try:
-        model_path = storage.resolve_model_path(model)
-    except Exception as exc:
-        console.print(f"[red]Could not resolve model path:[/red] {exc}")
-        raise typer.Exit(code=1)
-
-    # Load model
-    console.print(f"[cyan]Loading[/cyan] [bold]{model}[/bold] …")
-    try:
-        loaded_model, tokenizer = engine_loader.load_model(model_path)
-    except Exception as exc:
-        console.print(f"[red]Failed to load model:[/red] {exc}")
-        raise typer.Exit(code=1)
-
-    # Build FastAPI app
-    try:
-        fastapi_app = create_app(loaded_model, tokenizer, model_id=model)
-    except Exception as exc:
-        console.print(f"[red]Failed to create API app:[/red] {exc}")
-        raise typer.Exit(code=1)
-
-    # Write PID file
-    pid = os.getpid()
-    _write_pid_file(model, pid, host, port)
-
-    console.print(f"[bold green]Ouro serving[/bold green] [bold]{model}[/bold] on http://{host}:{port}/v1")
+    console.print(f"[bold green]Ouro[/bold green] starting on [cyan]http://{host}:{port}/v1[/cyan]")
+    console.print(f"Loading [bold]{len(cfg.models)}[/bold] model(s):")
+    for m in cfg.models:
+        console.print(f"  [dim]•[/dim] {m}")
     console.print("Press [bold]Ctrl-C[/bold] to stop.\n")
 
+    if background:
+        _daemonize(host, port)
+        return
+
+    # Foreground — write PID then run
+    _write_pid(os.getpid(), host, port)
     try:
-        uvicorn.run(fastapi_app, host=host, port=port, log_level="info")
+        from ouro.api.server import run_server
+        run_server(host=host, port=port)
     finally:
-        _remove_pid_file(model)
-        console.print(f"\n[yellow]Server for '{model}' stopped.[/yellow]")
+        _remove_pid()
+        console.print("\n[yellow]Ouro server stopped.[/yellow]")
+
+
+def _daemonize(host: str, port: int) -> None:
+    """Fork to background, redirect stdio, write PID file."""
+    pid = os.fork()
+    if pid > 0:
+        # Parent — print info and exit
+        console.print(f"[green]Ouro daemon started (PID {pid})[/green]")
+        console.print(f"  Logs: [cyan]~/.ouro/ouro.log[/cyan]")
+        console.print(f"  Stop: [bold]ouro stop[/bold]")
+        _write_pid(pid, host, port)
+        raise typer.Exit(code=0)
+
+    # Child — become session leader
+    os.setsid()
+
+    # Redirect stdio to log file
+    log_path = Path.home() / ".ouro" / "ouro.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a") as logf:
+        os.dup2(logf.fileno(), 1)
+        os.dup2(logf.fileno(), 2)
+
+    _write_pid(os.getpid(), host, port)
+
+    from ouro.api.server import run_server
+    try:
+        run_server(host=host, port=port)
+    finally:
+        _remove_pid()
 
 
 # ---------------------------------------------------------------------------
 # stop command
 # ---------------------------------------------------------------------------
 
-def stop_command(
-    model: str = typer.Argument(..., help="Model name of the running server to stop"),
-) -> None:
+def stop_command() -> None:
     """
-    [bold]Stop[/bold] a running Ouro serve process.
-
-    Sends SIGTERM to the process recorded in the PID file and removes the file.
+    [bold]Stop[/bold] a running Ouro server.
     """
-    pf = _pid_file(model)
-
-    if not pf.exists():
-        console.print(f"[red]No PID file found for model '[bold]{model}[/bold]'. Is it running?")
+    info = _read_pid()
+    if not info:
+        console.print("[red]No running Ouro server found.[/red]  (PID file missing)")
         raise typer.Exit(code=1)
 
-    try:
-        data = json.loads(pf.read_text())
-        pid: int = data["pid"]
-    except Exception as exc:
-        console.print(f"[red]Failed to read PID file:[/red] {exc}")
-        raise typer.Exit(code=1)
-
+    pid: int = info["pid"]
     try:
         os.kill(pid, signal.SIGTERM)
-        console.print(f"[green]✓ Sent SIGTERM to process {pid} (model: {model}).[/green]")
+        console.print(f"[green]✓ Sent SIGTERM to Ouro server (PID {pid})[/green]")
     except ProcessLookupError:
         console.print(f"[yellow]Process {pid} not found — it may have already exited.[/yellow]")
     except PermissionError:
-        console.print(f"[red]Permission denied sending signal to process {pid}.[/red]")
+        console.print(f"[red]Permission denied sending signal to PID {pid}.[/red]")
         raise typer.Exit(code=1)
     finally:
-        _remove_pid_file(model)
-        console.print(f"[dim]PID file for '{model}' removed.[/dim]")
+        _remove_pid()
