@@ -45,8 +45,12 @@ class OuroConfig:
     api_port: int = _DEFAULT_PORT
     hub_cache_dir: str = _DEFAULT_HUB_CACHE_DIR
     scan_paths: List[str] = field(default_factory=list)
-    # List of model IDs to load at startup — all served simultaneously
+    # List of model IDs available to serve (loaded on-demand, not at startup)
     models: List[str] = field(default_factory=list)
+    # Max number of models to keep loaded in RAM at once (0 = unlimited).
+    # When a new model is requested and this limit is reached, the
+    # least-recently-used loaded model is evicted first.
+    max_loaded_models: int = 1
     # HuggingFace token — enables gated models and higher download rate limits
     hf_token: Optional[str] = None
 
@@ -108,6 +112,7 @@ def load_config(config_path: Optional[Path] = None) -> OuroConfig:
         hub_cache_dir=file_cfg.get("hub_cache_dir", _DEFAULT_HUB_CACHE_DIR),
         scan_paths=list(file_cfg.get("scan_paths", [])),
         models=list(file_cfg.get("models", [])),
+        max_loaded_models=int(file_cfg.get("max_loaded_models", 1)),
         hf_token=_nested_get(file_cfg, "huggingface", "token"),
     )
 
@@ -156,6 +161,10 @@ def save_config(cfg: OuroConfig, config_path: Optional[Path] = None) -> None:
         data["default_model"] = cfg.default_model
     if cfg.scan_paths:
         data["scan_paths"] = list(cfg.scan_paths)
+    if cfg.models:
+        data["models"] = list(cfg.models)
+    if cfg.max_loaded_models != 1:
+        data["max_loaded_models"] = cfg.max_loaded_models
     if cfg.hf_token:
         data["huggingface"] = {"token": cfg.hf_token}
 

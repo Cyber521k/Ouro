@@ -9,10 +9,13 @@ falls back to the first loaded model (mirrors Ollama behaviour).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import uuid
 from typing import AsyncGenerator, Tuple, Any
+
+log = logging.getLogger("ouro.chat")
 
 try:
     from fastapi import APIRouter, HTTPException, Request
@@ -41,21 +44,34 @@ except ImportError:  # pragma: no cover
 
 router = APIRouter()
 
-# Regex to strip <think>…</think> blocks from generated text before returning
+# Regex to strip <think>…</think> blocks from generated text before returning.
+# Two patterns handled:
+#   1. Proper:  <think>…</think>  → strip whole block
+#   2. Orphan:  …</think>         → model emitted thinking without opening tag;
+#               strip everything up to and including the closing tag.
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_ORPHAN_THINK_RE = re.compile(r"^.*?</think>", re.DOTALL)
 
 
 def _strip_thinking(text: str) -> str:
-    return _THINK_RE.sub("", text).strip()
+    # Pass 1: strip properly-wrapped <think>…</think> blocks
+    text = _THINK_RE.sub("", text)
+    # Pass 2: strip orphaned …</think> prefix (no opening tag)
+    if "</think>" in text:
+        text = _ORPHAN_THINK_RE.sub("", text)
+    return text.strip()
 
 
 # ---------------------------------------------------------------------------
 # Model resolver
 # ---------------------------------------------------------------------------
 
-def _resolve_model(request: Request, requested_model: str | None) -> Tuple[Any, Any, str]:
+async def _resolve_model(request: Request, requested_model: str | None) -> Tuple[Any, Any, str]:
     """
     Resolve (model, tokenizer, model_id) from the multi-model registry.
+
+    Uses lazy loading: if the model is registered but not yet loaded into RAM,
+    it is loaded on first request (and the LRU model is evicted if needed).
 
     Falls back gracefully to legacy single-model state for backward compat.
     Raises HTTP 503 if no model is available.
@@ -65,27 +81,50 @@ def _resolve_model(request: Request, requested_model: str | None) -> Tuple[Any, 
         from ouro.api.server import ModelRegistry
         registry: ModelRegistry = request.app.state.registry
 
-        if not registry.is_empty():
-            ids = registry.all_ids()
+        # Use known_ids() so we can trigger lazy loading for registered-but-not-yet-loaded models
+        known = registry.known_ids()
 
-            # Try exact match first
-            if requested_model and requested_model in ids:
-                model, tokenizer = registry.get(requested_model)
-                return model, tokenizer, requested_model
+        if known:
+            # Resolve which model ID to use
+            target_id: str | None = None
 
-            # Fuzzy: requested name is a suffix of a loaded ID
             if requested_model:
-                for mid in ids:
-                    if mid.endswith(requested_model) or requested_model in mid:
-                        model, tokenizer = registry.get(mid)
-                        return model, tokenizer, mid
+                # Exact match first
+                if requested_model in known:
+                    target_id = requested_model
+                else:
+                    # Suffix / substring match
+                    for mid in known:
+                        if mid.endswith(requested_model) or requested_model in mid:
+                            target_id = mid
+                            break
 
-            # Fallback to first loaded model
-            first_id = ids[0]
-            model, tokenizer = registry.get(first_id)
-            return model, tokenizer, first_id
-    except Exception:
-        pass
+            if target_id is None:
+                # Fallback: use first known model
+                target_id = known[0]
+
+            # Resolve model path via storage
+            from ouro.registry.storage import resolve_model_path
+            model_path = resolve_model_path(target_id)
+
+            if model_path is None:
+                # Model not downloaded yet — tell the user clearly
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"Model '{target_id}' is registered but not downloaded. "
+                        f"Run: ouro pull {target_id}"
+                    ),
+                )
+
+            # ensure_loaded triggers lazy load (or returns cached) + LRU eviction
+            model, tokenizer = await registry.ensure_loaded(target_id, str(model_path))
+            return model, tokenizer, target_id
+
+    except HTTPException:
+        raise  # don't swallow our own HTTP errors
+    except Exception as exc:
+        log.warning("Multi-model registry path failed, trying legacy fallback: %s", exc)
 
     # ── Legacy single-model fallback ─────────────────────────────────────────
     model = getattr(request.app.state, "model", None)
@@ -244,17 +283,84 @@ async def _chat_stream_generator(
         request_data.max_tokens, request_data.temperature, request_data.top_p,
     )
 
+    # Stream tokens to the client while transparently stripping <think>…</think>.
+    #
+    # State machine:
+    #   "waiting"  — first tokens arriving; we don't know yet if there's a think block
+    #   "thinking" — inside a <think> block; buffer silently, don't stream
+    #   "streaming" — past any think block; stream every token immediately
+    #
+    # We use a small look-ahead buffer (≤ len("<think>") tokens) during "waiting"
+    # so we can decide which state to enter without losing early tokens.
     full_text = ""
+    state = "waiting"   # "waiting" | "thinking" | "streaming"
+    buffer = ""         # accumulates tokens in waiting/thinking states
+
+    THINK_OPEN = "<think>"
+    THINK_CLOSE = "</think>"
+
     try:
         for token in token_stream:
             full_text += token
+
+            if state == "streaming":
+                # Fast path — past any thinking block, stream directly
+                yield _sse(ChatCompletionChunk(
+                    id=completion_id, object="chat.completion.chunk",
+                    created=created, model=model_id,
+                    choices=[StreamChoice(index=0, delta=Delta(content=token), finish_reason=None)],
+                ).model_dump_json(exclude_none=True))
+
+            elif state == "thinking":
+                buffer += token
+                if THINK_CLOSE in buffer:
+                    # Exited thinking block — switch to streaming
+                    state = "streaming"
+                    after = buffer.split(THINK_CLOSE, 1)[1].lstrip("\n")
+                    buffer = ""
+                    if after:
+                        yield _sse(ChatCompletionChunk(
+                            id=completion_id, object="chat.completion.chunk",
+                            created=created, model=model_id,
+                            choices=[StreamChoice(index=0, delta=Delta(content=after), finish_reason=None)],
+                        ).model_dump_json(exclude_none=True))
+
+            else:  # state == "waiting"
+                buffer += token
+                if buffer.lstrip().startswith(THINK_OPEN):
+                    # Confirmed thinking block — switch to thinking state
+                    state = "thinking"
+                elif len(buffer) >= len(THINK_OPEN) and THINK_OPEN not in buffer:
+                    # Enough tokens buffered and no <think> — no thinking block
+                    # Flush buffer and switch to streaming
+                    state = "streaming"
+                    yield _sse(ChatCompletionChunk(
+                        id=completion_id, object="chat.completion.chunk",
+                        created=created, model=model_id,
+                        choices=[StreamChoice(index=0, delta=Delta(content=buffer), finish_reason=None)],
+                    ).model_dump_json(exclude_none=True))
+                    buffer = ""
+                # else: still accumulating the look-ahead buffer — keep waiting
+
     except Exception as exc:
         yield _sse(json.dumps({"error": {"message": str(exc), "type": "server_error"}}))
         yield "data: [DONE]\n\n"
         return
 
-    clean_text = _strip_thinking(full_text)
-    raw_tool_calls = _parse_tool_calls(clean_text)
+    # If we never left the thinking/waiting state (e.g. model only output <think>…</think>
+    # with no content after, or max_tokens hit mid-think), strip and send the whole text.
+    if state != "streaming" or buffer:
+        clean_text = _strip_thinking(full_text)
+        if clean_text:
+            yield _sse(ChatCompletionChunk(
+                id=completion_id, object="chat.completion.chunk",
+                created=created, model=model_id,
+                choices=[StreamChoice(index=0, delta=Delta(content=clean_text), finish_reason=None)],
+            ).model_dump_json(exclude_none=True))
+
+    # Check for tool calls in the full response
+    clean_full = _strip_thinking(full_text)
+    raw_tool_calls = _parse_tool_calls(clean_full)
 
     if raw_tool_calls:
         delta_tool_calls = [_raw_to_delta_tool_call(tc, i) for i, tc in enumerate(raw_tool_calls)]
@@ -267,11 +373,6 @@ async def _chat_stream_generator(
             )],
         ).model_dump_json(exclude_none=True))
     else:
-        yield _sse(ChatCompletionChunk(
-            id=completion_id, object="chat.completion.chunk", created=created, model=model_id,
-            choices=[StreamChoice(index=0, delta=Delta(content=clean_text), finish_reason=None)],
-        ).model_dump_json(exclude_none=True))
-
         yield _sse(ChatCompletionChunk(
             id=completion_id, object="chat.completion.chunk", created=created, model=model_id,
             choices=[StreamChoice(index=0, delta=Delta(), finish_reason="stop")],
@@ -287,7 +388,7 @@ async def _chat_stream_generator(
 @router.post("/v1/chat/completions")
 async def chat_completions(request_data: ChatCompletionRequest, request: Request):
     """OpenAI-compatible chat completions — dispatches to the requested model."""
-    model, tokenizer, model_id = _resolve_model(request, request_data.model)
+    model, tokenizer, model_id = await _resolve_model(request, request_data.model)
     prompt = _build_prompt(tokenizer, request_data.messages, request_data.tools)
 
     if request_data.stream:
@@ -303,7 +404,7 @@ async def chat_completions(request_data: ChatCompletionRequest, request: Request
 @router.post("/v1/completions")
 async def legacy_completions(request_data: CompletionRequest, request: Request):
     """Legacy /v1/completions — wraps prompt as a user chat message."""
-    model, tokenizer, model_id = _resolve_model(request, request_data.model)
+    model, tokenizer, model_id = await _resolve_model(request, request_data.model)
     messages = [ChatMessage(role="user", content=request_data.prompt)]
     prompt = _build_prompt(tokenizer, messages, None)
 

@@ -92,9 +92,9 @@ def serve_command(
         )
 
     console.print(f"[bold green]Ouro[/bold green] starting on [cyan]http://{host}:{port}/v1[/cyan]")
-    console.print(f"Loading [bold]{len(cfg.models)}[/bold] model(s):")
+    console.print(f"Registered [bold]{len(cfg.models)}[/bold] model(s) for lazy on-demand loading:")
     for m in cfg.models:
-        console.print(f"  [dim]•[/dim] {m}")
+        console.print(f"  [dim]•[/dim] {m} [dim](loaded into RAM on first request)[/dim]")
     console.print("Press [bold]Ctrl-C[/bold] to stop.\n")
 
     if background:

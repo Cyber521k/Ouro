@@ -20,14 +20,15 @@ router = APIRouter()
 
 @router.get("/v1/models", response_model=ModelListResponse)
 async def list_models(request: Request) -> ModelListResponse:
-    """Return all models that are currently loaded and ready to serve."""
+    """Return all known models (registered for lazy loading, whether loaded yet or not)."""
     models: list[ModelInfo] = []
 
     # Primary source: multi-model registry (new path)
+    # Use known_ids() so models registered-but-not-yet-loaded still appear.
     try:
         from ouro.api.server import ModelRegistry
         registry: ModelRegistry = request.app.state.registry
-        for model_id in registry.all_ids():
+        for model_id in registry.known_ids():
             models.append(
                 ModelInfo(
                     id=model_id,

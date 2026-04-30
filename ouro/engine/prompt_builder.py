@@ -149,10 +149,13 @@ def build_prompt(
                 prompt: str = apply_fn(clean_messages, **kwargs)
                 return prompt
             else:
-                # No tools — try with thinking enabled (Qwen3), fall back
-                # if the model doesn't support the kwarg.
+                # No tools — disable thinking mode (enable_thinking=False).
+                # Thinking mode causes the model to emit a long <think>…</think>
+                # block before answering; if max_tokens is hit mid-think the
+                # response is empty after stripping.  Non-thinking mode is faster,
+                # more predictable, and what most API consumers expect.
                 try:
-                    prompt = apply_fn(clean_messages, **{**kwargs, "enable_thinking": True})
+                    prompt = apply_fn(clean_messages, **{**kwargs, "enable_thinking": False})
                     return prompt
                 except TypeError:
                     pass  # model doesn't support enable_thinking kwarg
